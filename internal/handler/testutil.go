@@ -17,6 +17,7 @@ import (
 	"lumina-relay/internal/auth"
 	"lumina-relay/internal/db"
 	"lumina-relay/internal/service"
+	"lumina-relay/internal/store"
 )
 
 // init 把 Gin 切到 Release 模式并关掉默认日志输出，避免测试刷屏。
@@ -57,10 +58,12 @@ func newTestEnv(t *testing.T) *testEnv {
 	}
 	q := db.New(backend)
 	secret := []byte("test-jwt-secret-32-bytes-min!!!")
+	bs := store.NewBlockStore(filepath.Join(t.TempDir(), "blocks"))
 	deps := Deps{
 		AccountService:  service.NewAccountService(q),
 		DeviceService:   service.NewDeviceService(q),
 		ManifestService: service.NewManifestService(q),
+		BlocksService:   service.NewBlocksService(q, bs, 1024),
 		JWTSecret:       secret,
 		Queries:         q,
 		NonceStore:      auth.NewNonceStore(5 * time.Minute),
@@ -190,30 +193,42 @@ func (e *testEnv) registerSignedAccount(t *testing.T) (string, string, string, e
 	return accountID, deviceID, tok, priv
 }
 
-// signedPUT 构造合法签名的 PUT 请求并执行。nonceStore 由 env 内部路由持有。
+// signedPUT 构造合法签名的 PUT 请求（JSON body）并执行。
 func (e *testEnv) signedPUT(t *testing.T, token string, priv ed25519.PrivateKey, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	return e.signedReq(t, http.MethodPut, token, priv, path, []byte(body))
+}
+
+// signedPUTRaw 构造合法签名的 PUT 请求（原始字节 body）并执行。供块上传测试。
+func (e *testEnv) signedPUTRaw(t *testing.T, token string, priv ed25519.PrivateKey, path string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
 	return e.signedReq(t, http.MethodPut, token, priv, path, body)
+}
+
+// signedPOSTRaw 构造合法签名的 POST 请求（原始字节 body）并执行。供 have 端点测试。
+func (e *testEnv) signedPOSTRaw(t *testing.T, token string, priv ed25519.PrivateKey, path string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
+	return e.signedReq(t, http.MethodPost, token, priv, path, body)
 }
 
 // signedDELETE 构造合法签名的 DELETE 请求并执行。
 func (e *testEnv) signedDELETE(t *testing.T, token string, priv ed25519.PrivateKey, path string) *httptest.ResponseRecorder {
 	t.Helper()
-	return e.signedReq(t, http.MethodDelete, token, priv, path, "")
+	return e.signedReq(t, http.MethodDelete, token, priv, path, nil)
 }
 
 // signedReq 构造合法签名的请求（共用核心）。nonce 每次唯一（用时间纳秒）。
-func (e *testEnv) signedReq(t *testing.T, method, token string, priv ed25519.PrivateKey, path, body string) *httptest.ResponseRecorder {
+// body 为原始字节（nil 表示无 body）。
+func (e *testEnv) signedReq(t *testing.T, method, token string, priv ed25519.PrivateKey, path string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
 	tsStr := strconv.FormatInt(time.Now().UnixMilli(), 10)
-	// 每次唯一 nonce：时间纳秒 + 计数器，转 hex
 	nonce := strconv.FormatInt(time.Now().UnixNano(), 16)
-	canon := auth.BuildCanonical(method, path, tsStr, nonce, []byte(body))
+	canon := auth.BuildCanonical(method, path, tsStr, nonce, body)
 	sig := ed25519.Sign(priv, []byte(canon))
 
 	var bodyReader *bytes.Buffer
-	if body != "" {
-		bodyReader = bytes.NewBufferString(body)
+	if body != nil {
+		bodyReader = bytes.NewBuffer(body)
 	} else {
 		bodyReader = bytes.NewBuffer(nil)
 	}

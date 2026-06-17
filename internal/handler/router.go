@@ -19,6 +19,7 @@ type Deps struct {
 	AccountService  *service.AccountService
 	DeviceService   *service.DeviceService
 	ManifestService *service.ManifestService
+	BlocksService   *service.BlocksService
 	JWTSecret       []byte           // 签发/解析 session token 的 HS256 密钥
 	Queries         *db.Queries      // 数据访问（session 中间件查设备用）
 	NonceStore      *auth.NonceStore // 写操作签名防重放
@@ -57,6 +58,19 @@ func NewRouter(deps Deps) *gin.Engine {
 		middleware.RequireSession(deps.Queries, deps.JWTSecret),
 		middleware.RequireSignedWrite(deps.NonceStore),
 		PutManifest(deps))
+	// POST /blocks/have 批量查重（Session，sync-design §594/653）
+	r.POST("/blocks/have",
+		middleware.RequireSession(deps.Queries, deps.JWTSecret),
+		BlocksHave(deps))
+	// PUT /blocks/:blockId 上传密文块（Session + Signed，sync-design §595/660）
+	r.PUT("/blocks/:blockId",
+		middleware.RequireSession(deps.Queries, deps.JWTSecret),
+		middleware.RequireSignedWrite(deps.NonceStore),
+		PutBlock(deps))
+	// GET /blocks/:blockId 下载密文块（Session，sync-design §596）
+	r.GET("/blocks/:blockId",
+		middleware.RequireSession(deps.Queries, deps.JWTSecret),
+		GetBlock(deps))
 	return r
 }
 

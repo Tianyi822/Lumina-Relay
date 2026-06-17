@@ -66,6 +66,19 @@ WHERE account_id = ? AND current_version = ?`
 FROM manifests
 WHERE account_id = ? AND version = ?`
 
+	// sqlUpsertBlockMeta 插入块元数据。account_id+block_id 唯一（PK 为 block_id，
+	// 但同一账户的块去重靠 block_id 全局唯一）。IGNORE 保证幂等。
+	sqlUpsertBlockMeta = `INSERT OR IGNORE INTO blocks (block_id, account_id, size, ref_count, created_at)
+VALUES (?, ?, ?, 0, ?)`
+
+	// sqlGetBlockMeta 读取块元数据。不存在返 sql.ErrNoRows。
+	sqlGetBlockMeta = `SELECT block_id, account_id, size, ref_count, created_at
+FROM blocks
+WHERE block_id = ?`
+
+	// sqlSumBlockSizeByAccount 统计账户所有块的总字节数（配额检查用）。
+	sqlSumBlockSizeByAccount = `SELECT COALESCE(SUM(size), 0) FROM blocks WHERE account_id = ?`
+
 	// sqlCountRows 统计指定表行数。表名为包内白名单常量，禁止用户输入（见 data-layer spec §3.4）。
 	sqlCountRows = `SELECT COUNT(*) FROM %s`
 )
@@ -281,6 +294,45 @@ func (q *Queries) GetManifestByAccount(ctx context.Context, accountID string, ve
 		return ManifestRow{}, fmt.Errorf("读取 manifest：%w", err)
 	}
 	return row, nil
+}
+
+// BlockMetaRow 是 blocks 表元数据行。
+type BlockMetaRow struct {
+	BlockID   string
+	AccountID string
+	Size      int64
+	RefCount  int64
+	CreatedAt int64
+}
+
+// UpsertBlockMeta 插入块元数据（幂等，INSERT OR IGNORE）。
+// 返回受影响行数：1=新建，0=已存在。
+func (q *Queries) UpsertBlockMeta(ctx context.Context, blockID, accountID string, size, createdAt int64) (int64, error) {
+	res, err := q.db.ExecContext(ctx, sqlUpsertBlockMeta, blockID, accountID, size, createdAt)
+	if err != nil {
+		return 0, fmt.Errorf("插入块元数据：%w", err)
+	}
+	return res.RowsAffected()
+}
+
+// GetBlockMeta 读取块元数据。不存在返 sql.ErrNoRows。
+func (q *Queries) GetBlockMeta(ctx context.Context, blockID string) (BlockMetaRow, error) {
+	var row BlockMetaRow
+	if err := q.db.QueryRowxContext(ctx, sqlGetBlockMeta, blockID).Scan(
+		&row.BlockID, &row.AccountID, &row.Size, &row.RefCount, &row.CreatedAt,
+	); err != nil {
+		return BlockMetaRow{}, fmt.Errorf("读取块元数据：%w", err)
+	}
+	return row, nil
+}
+
+// SumBlockSizeByAccount 返回账户所有块的总字节数（配额检查用）。无块返 0。
+func (q *Queries) SumBlockSizeByAccount(ctx context.Context, accountID string) (int64, error) {
+	var total int64
+	if err := q.db.QueryRowxContext(ctx, sqlSumBlockSizeByAccount, accountID).Scan(&total); err != nil {
+		return 0, fmt.Errorf("统计账户块大小：%w", err)
+	}
+	return total, nil
 }
 
 // CountRows 统计指定表行数。

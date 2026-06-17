@@ -269,3 +269,50 @@ func TestQueries_ManifestCAS(t *testing.T) {
 		t.Fatalf("ciphertext = %q, want ct1", row.Ciphertext)
 	}
 }
+
+// TestQueries_BlockMeta 验证 UpsertBlockMeta（幂等）+ GetBlockMeta + SumBlockSizeByAccount。
+func TestQueries_BlockMeta(t *testing.T) {
+	q, cleanup := openTestQueries(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedAccount(t, q, "acc-b")
+
+	// 首次插入
+	n, err := q.UpsertBlockMeta(ctx, "blk1", "acc-b", 100, 1)
+	if err != nil {
+		t.Fatalf("UpsertBlockMeta 失败：%v", err)
+	}
+	if n != 1 {
+		t.Fatalf("首次受影响行数 = %d, want 1", n)
+	}
+
+	// 幂等：重复插入返 0
+	n, _ = q.UpsertBlockMeta(ctx, "blk1", "acc-b", 100, 1)
+	if n != 0 {
+		t.Fatalf("重复插入行数 = %d, want 0", n)
+	}
+
+	// 读取元数据
+	meta, err := q.GetBlockMeta(ctx, "blk1")
+	if err != nil {
+		t.Fatalf("GetBlockMeta 失败：%v", err)
+	}
+	if meta.Size != 100 || meta.AccountID != "acc-b" {
+		t.Fatalf("meta = %+v", meta)
+	}
+
+	// 配额统计
+	total, err := q.SumBlockSizeByAccount(ctx, "acc-b")
+	if err != nil {
+		t.Fatalf("SumBlockSizeByAccount 失败：%v", err)
+	}
+	if total != 100 {
+		t.Fatalf("total = %d, want 100", total)
+	}
+
+	// 无块的账户返 0
+	total, _ = q.SumBlockSizeByAccount(ctx, "acc-empty")
+	if total != 0 {
+		t.Fatalf("空账户 total = %d, want 0", total)
+	}
+}
