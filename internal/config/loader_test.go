@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"gopkg.in/yaml.v3"
+
 	"lumina-relay/internal/logger"
 )
 
@@ -134,5 +136,24 @@ func TestLoad_EnvOverridesLog(t *testing.T) {
 	}
 	if cfg.Log.Level != "warn" {
 		t.Fatalf("Log.Level 应被 env 覆盖为 warn，got %q", cfg.Log.Level)
+	}
+}
+
+// 黄金配置文件冒烟：仓库根的 config.yaml 必须存在且是合法 YAML。
+// Red 阶段：文件尚未创建 → ReadFile 失败 → 测试失败。
+// 注意：测试运行目录是 internal/config/，仓库根在相对路径 ../../。
+func TestGoldenConfigFile_IsValidYAML(t *testing.T) {
+	path := filepath.Join("..", "..", "config.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("config.yaml 不存在或不可读（应随仓库提交）：%v", err)
+	}
+	var cfg AppConfig
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("config.yaml 解析失败：%v", err)
+	}
+	// 默认配置的关键字段（与 Default() 一致）
+	if cfg.Server.Port != 8443 || cfg.Log.Level != "info" || !cfg.Log.File.Enabled {
+		t.Fatalf("config.yaml 值与预期不符：%+v", cfg)
 	}
 }
