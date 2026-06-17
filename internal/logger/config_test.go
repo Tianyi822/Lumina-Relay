@@ -54,3 +54,50 @@ func TestParseLevel(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyEnvOverrides_Level(t *testing.T) {
+	t.Setenv("LUMINA_LOG_LEVEL", "debug")
+	cfg := ApplyEnvOverrides(DefaultConfig())
+	if cfg.Level != "debug" {
+		t.Fatalf("Level = %q, want \"debug\"", cfg.Level)
+	}
+}
+
+func TestApplyEnvOverrides_FilePath(t *testing.T) {
+	t.Setenv("LUMINA_LOG_FILE", "/tmp/custom.log")
+	cfg := ApplyEnvOverrides(DefaultConfig())
+	if cfg.File.Path != "/tmp/custom.log" {
+		t.Fatalf("Path = %q, want /tmp/custom.log", cfg.File.Path)
+	}
+	if !cfg.File.Enabled {
+		t.Fatal("设置 LUMINA_LOG_FILE 后 Enabled 应为 true")
+	}
+}
+
+func TestApplyEnvOverrides_FileEnabledFalse(t *testing.T) {
+	t.Setenv("LUMINA_LOG_FILE_ENABLED", "false")
+	cfg := ApplyEnvOverrides(DefaultConfig())
+	if cfg.File.Enabled {
+		t.Fatal("Enabled 应被覆盖为 false")
+	}
+}
+
+func TestApplyEnvOverrides_FileEnabledOne(t *testing.T) {
+	t.Setenv("LUMINA_LOG_FILE_ENABLED", "1")
+	cfg := ApplyEnvOverrides(DefaultConfig())
+	if !cfg.File.Enabled {
+		t.Fatal("Enabled 应被 \"1\" 覆盖为 true")
+	}
+}
+
+// 显式清空可能从进程环境继承的 LUMINA_LOG_* 变量，
+// 保证"无 env 覆盖"断言不受外部环境污染。
+func TestApplyEnvOverrides_NoEnvKeepsDefaults(t *testing.T) {
+	t.Setenv("LUMINA_LOG_LEVEL", "")
+	t.Setenv("LUMINA_LOG_FILE", "")
+	t.Setenv("LUMINA_LOG_FILE_ENABLED", "")
+	cfg := ApplyEnvOverrides(DefaultConfig())
+	if cfg.Level != "info" || !cfg.File.Enabled {
+		t.Fatalf("无 env 覆盖时应保留默认：%+v", cfg)
+	}
+}

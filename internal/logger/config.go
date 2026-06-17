@@ -2,6 +2,7 @@ package logger
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"go.uber.org/zap/zapcore"
@@ -48,4 +49,22 @@ func parseLevel(s string) (zapcore.Level, error) {
 	default:
 		return zapcore.InfoLevel, fmt.Errorf("未知日志级别 %q，回退到 info", s)
 	}
+}
+
+// ApplyEnvOverrides 用环境变量覆盖配置（env 优先级最高）。
+// 调用时 zap 通常未就绪，日志走 slog 兜底（调用方需先 InitBootstrap）。
+func ApplyEnvOverrides(cfg LogConfig) LogConfig {
+	if v := os.Getenv("LUMINA_LOG_LEVEL"); v != "" {
+		Info("日志级别被环境变量覆盖", String("level", v))
+		cfg.Level = v
+	}
+	if v := os.Getenv("LUMINA_LOG_FILE"); v != "" {
+		Info("日志文件路径被环境变量覆盖", String("path", v))
+		cfg.File.Path = v
+		cfg.File.Enabled = true
+	}
+	if v := os.Getenv("LUMINA_LOG_FILE_ENABLED"); v != "" {
+		cfg.File.Enabled = (v == "true" || v == "1")
+	}
+	return cfg
 }
