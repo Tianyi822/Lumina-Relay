@@ -6,6 +6,8 @@ package service
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -30,6 +32,13 @@ type RegisterInput struct {
 type RegisterOutput struct {
 	AccountID string
 	DeviceID  string
+}
+
+// DEKEnvelope 是账户的 DEK 信封（盐/nonce/密文），GET /account/dek 返回。
+type DEKEnvelope struct {
+	Salt  []byte
+	Nonce []byte
+	Ct    []byte
 }
 
 // AccountService 封装账户相关业务逻辑。
@@ -79,4 +88,19 @@ func (s *AccountService) Register(ctx context.Context, in RegisterInput) (Regist
 		return RegisterOutput{}, fmt.Errorf("注册账户：%w", err)
 	}
 	return out, nil
+}
+
+// ErrAccountNotFound 表示账户不存在。handler 据此映射 404。
+var ErrAccountNotFound = errors.New("account not found")
+
+// GetDEK 读取账户的 DEK 信封。账户不存在时返回 ErrAccountNotFound。
+func (s *AccountService) GetDEK(ctx context.Context, accountID string) (DEKEnvelope, error) {
+	row, err := s.q.GetAccountDEK(ctx, accountID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return DEKEnvelope{}, ErrAccountNotFound
+		}
+		return DEKEnvelope{}, fmt.Errorf("读取 DEK：%w", err)
+	}
+	return DEKEnvelope{Salt: row.DekSalt, Nonce: row.DekNonce, Ct: row.DekCt}, nil
 }

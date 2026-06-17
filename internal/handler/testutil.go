@@ -28,6 +28,16 @@ type testEnv struct {
 	cleanup   func()
 }
 
+// registerBody 是注册请求的测试用 body 结构（字段对齐 sync-design §213）。
+type registerBody struct {
+	RecoveryCodeHash string `json:"recoveryCodeHash"`
+	DekSalt          string `json:"dekSalt"`
+	DekNonce         string `json:"dekNonce"`
+	DekCt            string `json:"dekCt"`
+	DevicePubKey     string `json:"devicePubKey"`
+	DeviceName       string `json:"deviceName"`
+}
+
 // newTestEnv 构造一个接好真实 DB + AccountService + JWT 的测试环境。
 // DB 基于 t.TempDir()，不碰 ~/.lumina-relay。cleanup 关闭连接。
 func newTestEnv(t *testing.T) *testEnv {
@@ -65,6 +75,31 @@ func (e *testEnv) doPOST(target string, body any) *httptest.ResponseRecorder {
 	rec := httptest.NewRecorder()
 	e.router.ServeHTTP(rec, req)
 	return rec
+}
+
+// doGET 发送 GET 请求（testEnv 方法，供需要带 env 的测试用）。
+func (e *testEnv) doGET(target string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, target, nil)
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+	return rec
+}
+
+// registerAccount 通过 POST /account/register 注册一个账户，返回 accountId。
+// 供依赖既有账户的端点测试（如 GET /account/dek）快速准备数据。
+func (e *testEnv) registerAccount(t *testing.T, body registerBody) string {
+	t.Helper()
+	rec := e.doPOST("/account/register", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("registerAccount 失败：status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		AccountID string `json:"accountId"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析注册响应失败：%v", err)
+	}
+	return resp.AccountID
 }
 
 // doGET 是 GET 请求的薄封装（health 测试用）。

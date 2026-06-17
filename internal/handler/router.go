@@ -1,8 +1,11 @@
 package handler
 
 import (
+	"time"
+
 	"github.com/gin-gonic/gin"
 
+	"lumina-relay/internal/middleware"
 	"lumina-relay/internal/service"
 )
 
@@ -16,11 +19,14 @@ type Deps struct {
 }
 
 // NewRouter 基于 deps 构造 *gin.Engine 并注册全部已实现的路由。
-// 随端点增加，这里增量注册（每个 handler Task 的 Green 阶段加一行）。
+// 限流器在路由层按 sync-design §6.6 配置（/account/dek: 10/min/IP）。
 func NewRouter(deps Deps) *gin.Engine {
 	r := gin.New()
 	r.GET("/health", Health)
 	r.POST("/account/register", RegisterAccount(deps))
+	// GET /account/dek 限流 10次/分钟/IP（防恢复码爆破，sync-design §696）
+	dekLimiter := middleware.NewIPLimiter(10, time.Minute)
+	r.GET("/account/dek", middleware.IPLimit(dekLimiter), GetAccountDEK(deps))
 	return r
 }
 
