@@ -91,18 +91,77 @@ func TestDeviceService_RegisterDevice_AccountNotFound(t *testing.T) {
 // 返回 accountId 与已存的 recoveryCodeHash。测试用同一 hash 模拟客户端正确输入。
 func seedAccountForDevice(t *testing.T, q *db.Queries) (string, []byte) {
 	t.Helper()
-	accountID := "acc-device-test"
-	wantHash := []byte("the-real-recovery-hash")
+	return seedAccountWithID(t, q, "acc-device-test", []byte("the-real-recovery-hash"))
+}
+
+// seedAccountWithID 建指定 id 的账户，供需要多账户的测试复用。
+func seedAccountWithID(t *testing.T, q *db.Queries, accountID string, hash []byte) (string, []byte) {
+	t.Helper()
 	if err := q.CreateAccount(context.Background(), db.CreateAccountParams{
 		AccountID:        accountID,
-		RecoveryCodeHash: wantHash,
+		RecoveryCodeHash: hash,
 		DekSalt:          []byte("s"),
 		DekNonce:         []byte("n"),
 		DekCt:            []byte("c"),
 		CreatedAt:        1,
 	}); err != nil {
-		t.Fatalf("seedAccount 失败：%v", err)
+		t.Fatalf("seedAccountWithID(%s) 失败：%v", accountID, err)
 	}
-	return accountID, wantHash
+	return accountID, hash
+}
+
+// TestRevokeDevice_OwnDevice 验证账户能吊销自己名下的设备。
+func TestRevokeDevice_OwnDevice(t *testing.T) {
+	q, cleanup := openQueries(t)
+	defer cleanup()
+	accountID, _ := seedAccountForDevice(t, q)
+
+	// 为该账户建一台设备
+	svc := NewDeviceService(q)
+	out, err := svc.RegisterDevice(context.Background(), DeviceRegisterInput{
+		AccountID: accountID, RecoveryCodeHash: []byte("the-real-recovery-hash"),
+		DevicePubKey: "pub", DeviceName: "d",
+	})
+	if err != nil {
+		t.Fatalf("建设备失败：%v", err)
+	}
+
+	if err := svc.RevokeDevice(context.Background(), accountID, out.DeviceID); err != nil {
+		t.Fatalf("吊销自己设备应成功，得到 %v", err)
+	}
+}
+
+// TestRevokeDevice_CrossAccount_Rejected 是安全修复的核心测试：
+// 账户 B 试图吊销账户 A 的设备，必须被拒（ErrDeviceForbidden）。
+// 修复前：RevokeDevice 不校验归属，B 能吊销 A 的设备（越权）。
+func TestRevokeDevice_CrossAccount_Rejected(t *testing.T) {
+	q, cleanup := openQueries(t)
+	defer cleanup()
+
+	// 建两个账户
+	seedAccountWithID(t, q, "acc-owner", []byte("h1"))
+	seedAccountWithID(t, q, "acc-attacker", []byte("h2"))
+
+	// 为 owner 建设备
+	ownerSvc := NewDeviceService(q)
+	ownerDev, err := ownerSvc.RegisterDevice(context.Background(), DeviceRegisterInput{
+		AccountID: "acc-owner", RecoveryCodeHash: []byte("h1"),
+		DevicePubKey: "pub-owner", DeviceName: "owner-dev",
+	})
+	if err != nil {
+		t.Fatalf("建 owner 设备失败：%v", err)
+	}
+
+	// attacker 试图吊销 owner 的设备
+	err = ownerSvc.RevokeDevice(context.Background(), "acc-attacker", ownerDev.DeviceID)
+	if !errors.Is(err, ErrDeviceForbidden) {
+		t.Fatalf("跨账户吊销应返 ErrDeviceForbidden，得到 %v", err)
+	}
+
+	// 验证 owner 的设备未被吊销
+	dev, _ := q.GetDevice(context.Background(), ownerDev.DeviceID)
+	if dev.RevokedAt.Valid {
+		t.Fatal("attacker 吊销失败后，owner 设备不应被标记为已吊销")
+	}
 }
 

@@ -71,15 +71,33 @@ func (s *DeviceService) RegisterDevice(ctx context.Context, in DeviceRegisterInp
 // ErrDeviceNotFound 表示设备不存在或已吊销。handler 据此映射 404。
 var ErrDeviceNotFound = errors.New("device not found")
 
+// ErrDeviceForbidden 表示调用者无权操作该设备（设备不属于其账户）。
+// 安全修复：防止跨账户吊销。handler 据此映射 403。
+var ErrDeviceForbidden = errors.New("device does not belong to caller")
+
 // RevokeDevice 吊销指定设备（置 revoked_at）。幂等。
-// 设备不存在或已吊销均返回 ErrDeviceNotFound（对客户端语义一致：已无效）。
+// callerAccountID 为调用者账户（session 注入），必须与设备归属一致。
+// 设备不存在或已吊销返回 ErrDeviceNotFound；跨账户操作返回 ErrDeviceForbidden。
 // 见 sync-design §288-289。
-func (s *DeviceService) RevokeDevice(ctx context.Context, deviceID string) error {
+func (s *DeviceService) RevokeDevice(ctx context.Context, callerAccountID, deviceID string) error {
+	// 先查设备归属（防越权）
+	dev, err := s.q.GetDevice(ctx, deviceID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrDeviceNotFound
+		}
+		return fmt.Errorf("查询设备：%w", err)
+	}
+	if dev.AccountID != callerAccountID {
+		return ErrDeviceForbidden
+	}
+
 	n, err := s.q.RevokeDevice(ctx, deviceID, time.Now().Unix())
 	if err != nil {
 		return fmt.Errorf("吊销设备：%w", err)
 	}
 	if n == 0 {
+		// 设备存在但已吊销（幂等场景）
 		return ErrDeviceNotFound
 	}
 	return nil

@@ -92,9 +92,11 @@ func RegisterDevice(deps Deps) gin.HandlerFunc {
 
 // DeleteDevice 返回 DELETE /device/:deviceId 的 gin handler。
 // 前置依赖 RequireSession + RequireSignedWrite。
-// 吊销指定设备，幂等。见 sync-design §288-289。
+// 吊销指定设备，幂等。只能吊销调用者自己账户名下的设备（防越权）。
+// 见 sync-design §288-289。
 func DeleteDevice(deps Deps) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		callerAccountID := c.GetString("accountId")
 		deviceID := c.Param("deviceId")
 		if deviceID == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
@@ -103,16 +105,21 @@ func DeleteDevice(deps Deps) gin.HandlerFunc {
 			return
 		}
 
-		if err := deps.DeviceService.RevokeDevice(c.Request.Context(), deviceID); err != nil {
-			if errors.Is(err, service.ErrDeviceNotFound) {
+		if err := deps.DeviceService.RevokeDevice(c.Request.Context(), callerAccountID, deviceID); err != nil {
+			switch {
+			case errors.Is(err, service.ErrDeviceForbidden):
+				c.JSON(http.StatusForbidden, gin.H{"error": gin.H{
+					"code": "forbidden", "message": "无权操作该设备",
+				}})
+			case errors.Is(err, service.ErrDeviceNotFound):
 				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{
 					"code": "device_not_found", "message": "设备不存在",
 				}})
-				return
+			default:
+				c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+					"code": "internal_error", "message": "吊销设备失败",
+				}})
 			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
-				"code": "internal_error", "message": "吊销设备失败",
-			}})
 			return
 		}
 		c.Status(http.StatusNoContent)
