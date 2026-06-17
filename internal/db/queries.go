@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/jmoiron/sqlx"
@@ -18,6 +19,39 @@ const (
 	sqlGetAccountDEK = `SELECT dek_salt, dek_nonce, dek_ct
 FROM accounts
 WHERE account_id = ?`
+
+	// sqlCreateDevice 插入一行设备，绑定到已存在的 account。
+	sqlCreateDevice = `INSERT INTO devices (
+    device_id, account_id, device_pub_key, device_name, created_at
+) VALUES (?, ?, ?, ?, ?)`
+
+	// sqlGetDevice 读取设备记录。不存在时返回 sql.ErrNoRows。
+	sqlGetDevice = `SELECT device_id, account_id, device_pub_key, device_name, created_at, revoked_at
+FROM devices
+WHERE device_id = ?`
+
+	// sqlInsertManifestHead 初始化账户的 manifest_head（current_version=0）。
+	sqlInsertManifestHead = `INSERT INTO manifest_head (account_id, current_version, updated_at)
+VALUES (?, 0, ?)`
+
+	// sqlGetManifestHead 读取账户当前 manifest 版本。不存在时返回 sql.ErrNoRows。
+	sqlGetManifestHead = `SELECT account_id, current_version, updated_at
+FROM manifest_head
+WHERE account_id = ?`
+
+	// sqlCountRows 统计指定表行数。表名为包内白名单常量，禁止用户输入（见 data-layer spec §3.4）。
+	sqlCountRows = `SELECT COUNT(*) FROM %s`
+)
+
+// TableName 是受信任的表名白名单类型，供 CountRows 避免注入。
+type TableName string
+
+const (
+	TableAccounts     TableName = "accounts"
+	TableDevices      TableName = "devices"
+	TableBlocks       TableName = "blocks"
+	TableManifests    TableName = "manifests"
+	TableManifestHead TableName = "manifest_head"
 )
 
 // CreateAccountParams 是 CreateAccount 的入参。
@@ -58,6 +92,88 @@ func (q *Queries) GetAccountDEK(ctx context.Context, accountID string) (AccountD
 		return AccountDEKRow{}, fmt.Errorf("读取账户 DEK：%w", err)
 	}
 	return row, nil
+}
+
+// CreateDeviceParams 是 CreateDevice 的入参。
+type CreateDeviceParams struct {
+	DeviceID      string
+	AccountID     string
+	DevicePubKey  string // hex 编码的 Ed25519 公钥
+	DeviceName    string
+	CreatedAt     int64
+}
+
+// CreateDevice 插入一行设备记录。
+func (q *Queries) CreateDevice(ctx context.Context, p CreateDeviceParams) error {
+	_, err := q.db.ExecContext(ctx, sqlCreateDevice,
+		p.DeviceID, p.AccountID, p.DevicePubKey, p.DeviceName, p.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("插入设备：%w", err)
+	}
+	return nil
+}
+
+// DeviceRow 是 GetDevice 的返回行。
+// RevokedAt 用 sql.NullInt64 表达可空的吊销时间戳。
+type DeviceRow struct {
+	DeviceID     string
+	AccountID    string
+	DevicePubKey string
+	DeviceName   string
+	CreatedAt    int64
+	RevokedAt    sql.NullInt64
+}
+
+// GetDevice 读取设备记录。设备不存在时返回 sql.ErrNoRows。
+func (q *Queries) GetDevice(ctx context.Context, deviceID string) (DeviceRow, error) {
+	var row DeviceRow
+	if err := q.db.QueryRowxContext(ctx, sqlGetDevice, deviceID).Scan(
+		&row.DeviceID, &row.AccountID, &row.DevicePubKey, &row.DeviceName,
+		&row.CreatedAt, &row.RevokedAt,
+	); err != nil {
+		return DeviceRow{}, fmt.Errorf("读取设备：%w", err)
+	}
+	return row, nil
+}
+
+// InsertManifestHead 初始化账户的 manifest_head，current_version 固定为 0。
+// createdAt 为 Unix 秒。
+func (q *Queries) InsertManifestHead(ctx context.Context, accountID string, createdAt int64) error {
+	_, err := q.db.ExecContext(ctx, sqlInsertManifestHead, accountID, createdAt)
+	if err != nil {
+		return fmt.Errorf("初始化 manifest_head：%w", err)
+	}
+	return nil
+}
+
+// ManifestHeadRow 是 GetManifestHead 的返回行。
+type ManifestHeadRow struct {
+	AccountID      string
+	CurrentVersion int64
+	UpdatedAt      int64
+}
+
+// GetManifestHead 读取账户当前 manifest 版本。不存在时返回 sql.ErrNoRows。
+func (q *Queries) GetManifestHead(ctx context.Context, accountID string) (ManifestHeadRow, error) {
+	var row ManifestHeadRow
+	if err := q.db.QueryRowxContext(ctx, sqlGetManifestHead, accountID).Scan(
+		&row.AccountID, &row.CurrentVersion, &row.UpdatedAt,
+	); err != nil {
+		return ManifestHeadRow{}, fmt.Errorf("读取 manifest_head：%w", err)
+	}
+	return row, nil
+}
+
+// CountRows 统计指定表行数。
+// table 必须是受信任的 TableName 白名单（见 data-layer spec §3.4），杜绝注入。
+// 白名单类型的 %s 拼接是本层唯一允许的字符串入 SQL 场景。
+func (q *Queries) CountRows(ctx context.Context, dest *int, table TableName) error {
+	// 白名单类型保证 table 不可被用户输入污染；此处 %s 安全。
+	qstr := fmt.Sprintf(sqlCountRows, table)
+	if err := q.db.QueryRowxContext(ctx, qstr).Scan(dest); err != nil {
+		return fmt.Errorf("统计 %s 行数：%w", table, err)
+	}
+	return nil
 }
 
 // Queries 封装数据访问层。持有 sqlx.ExtContext 接口，

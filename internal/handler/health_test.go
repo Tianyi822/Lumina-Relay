@@ -8,7 +8,7 @@ import (
 // TestHealth 验证 GET /health 返回 200 且 body 为 {"status":"ok"}。
 // 见计划 Task 8a Step 1：路由未注册时 404 或编译失败。
 func TestHealth(t *testing.T) {
-	rec := doGET(newTestRouter(t), "/health")
+	rec := doGET(NewRouter(Deps{}), "/health")
 
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200", rec.Code)

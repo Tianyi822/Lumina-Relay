@@ -1,36 +1,73 @@
 package handler
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+
+	"lumina-relay/internal/db"
+	"lumina-relay/internal/service"
 )
 
 // init 把 Gin 切到 Release 模式并关掉默认日志输出，避免测试刷屏。
-// testutil 是测试基建，仅 handler 包内部测试引用。
 func init() {
 	gin.SetMode(gin.TestMode)
 }
 
-// newTestEnv 构造最小测试环境。本 Task（8a）只含路由构造所需依赖；
-// 后续 Task 按需扩展（DB、JWT secret、BlockStore 等）。
-//
-// 计划约定：testutil 随 Task 需要逐步增长，每个 Task 的 Green 只添加本 Task 用到的 helper。
+// testEnv 是 handler 测试的运行环境，持有真实 DB 后端与依赖。
+// 随 Task 推进增量添加字段（BlockStore、ManifestService 等）。
 type testEnv struct {
-	router *gin.Engine
+	router    *gin.Engine
+	jwtSecret []byte
+	q         *db.Queries // 供测试做副作用断言
+	cleanup   func()
 }
 
-// newTestRouter 构造一个挂载了全部已实现路由的 *gin.Engine，供 handler 测试调用。
-// 随端点增加，NewRouter 的 deps 也会相应扩展；这里集中注入测试 deps。
-func newTestRouter(t *testing.T) *gin.Engine {
+// newTestEnv 构造一个接好真实 DB + AccountService + JWT 的测试环境。
+// DB 基于 t.TempDir()，不碰 ~/.lumina-relay。cleanup 关闭连接。
+func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
-	return NewRouter(Deps{})
+	dsn := filepath.Join(t.TempDir(), "test.db")
+	if err := db.MigrateUp(dsn); err != nil {
+		t.Fatalf("迁移失败：%v", err)
+	}
+	backend, err := db.Open(dsn)
+	if err != nil {
+		t.Fatalf("打开数据库失败：%v", err)
+	}
+	q := db.New(backend)
+	secret := []byte("test-jwt-secret-32-bytes-min!!!")
+	deps := Deps{
+		AccountService: service.NewAccountService(q),
+		JWTSecret:      secret,
+	}
+	return &testEnv{
+		router:    NewRouter(deps),
+		jwtSecret: secret,
+		q:         q,
+		cleanup:   func() { _ = backend.Close() },
+	}
 }
 
-// doGET 是 GET 请求的薄封装，返回 *httptest.ResponseRecorder。
-// 命名为 doGET 而非 GET，避免与关键字/类型混淆。
+// doPOST 发送 JSON POST 请求，返回 ResponseRecorder。
+func (e *testEnv) doPOST(target string, body any) *httptest.ResponseRecorder {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		panic("doPOST 序列化失败：" + err.Error())
+	}
+	req := httptest.NewRequest(http.MethodPost, target, bytes.NewBuffer(raw))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+	return rec
+}
+
+// doGET 是 GET 请求的薄封装（health 测试用）。
 func doGET(r http.Handler, target string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	rec := httptest.NewRecorder()
