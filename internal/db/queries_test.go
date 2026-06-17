@@ -151,3 +151,38 @@ func TestQueries_CountRows(t *testing.T) {
 		t.Fatalf("devices 行数 = %d, want 0", n)
 	}
 }
+
+// TestQueries_GetAccountRecoveryHash 验证能读回注册时存的恢复码哈希。
+func TestQueries_GetAccountRecoveryHash(t *testing.T) {
+	q, cleanup := openTestQueries(t)
+	defer cleanup()
+	ctx := context.Background()
+	wantHash := []byte("recovery-hash-bytes")
+	if err := q.CreateAccount(ctx, CreateAccountParams{
+		AccountID:        "acc-r",
+		RecoveryCodeHash: wantHash,
+		DekSalt:          []byte("s"),
+		DekNonce:         []byte("n"),
+		DekCt:            []byte("c"),
+		CreatedAt:        1,
+	}); err != nil {
+		t.Fatalf("CreateAccount 失败：%v", err)
+	}
+
+	got, err := q.GetAccountRecoveryHash(ctx, "acc-r")
+	if err != nil {
+		t.Fatalf("GetAccountRecoveryHash 失败：%v", err)
+	}
+	if !bytes.Equal(got, wantHash) {
+		t.Fatalf("hash 不匹配：got %q want %q", got, wantHash)
+	}
+}
+
+// TestQueries_GetAccountRecoveryHash_NotFound 验证账户不存在时报错。
+func TestQueries_GetAccountRecoveryHash_NotFound(t *testing.T) {
+	q, cleanup := openTestQueries(t)
+	defer cleanup()
+	if _, err := q.GetAccountRecoveryHash(context.Background(), "missing"); err == nil {
+		t.Fatal("账户不存在应报错")
+	}
+}

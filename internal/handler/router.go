@@ -15,11 +15,12 @@ import (
 // 集中在 Deps 而非全局变量，便于测试注入与生命周期管理。
 type Deps struct {
 	AccountService *service.AccountService
+	DeviceService  *service.DeviceService
 	JWTSecret      []byte // 签发/解析 session token 的 HS256 密钥
 }
 
 // NewRouter 基于 deps 构造 *gin.Engine 并注册全部已实现的路由。
-// 限流器在路由层按 sync-design §6.6 配置（/account/dek: 10/min/IP）。
+// 限流器在路由层按 sync-design §6.6 配置。
 func NewRouter(deps Deps) *gin.Engine {
 	r := gin.New()
 	r.GET("/health", Health)
@@ -27,6 +28,9 @@ func NewRouter(deps Deps) *gin.Engine {
 	// GET /account/dek 限流 10次/分钟/IP（防恢复码爆破，sync-design §696）
 	dekLimiter := middleware.NewIPLimiter(10, time.Minute)
 	r.GET("/account/dek", middleware.IPLimit(dekLimiter), GetAccountDEK(deps))
+	// POST /device/register 限流 5次/分钟/IP（防恢复码爆破，sync-design §697）
+	deviceLimiter := middleware.NewIPLimiter(5, time.Minute)
+	r.POST("/device/register", middleware.IPLimit(deviceLimiter), RegisterDevice(deps))
 	return r
 }
 

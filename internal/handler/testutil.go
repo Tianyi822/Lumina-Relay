@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"lumina-relay/internal/auth"
 	"lumina-relay/internal/db"
 	"lumina-relay/internal/service"
 )
@@ -38,7 +39,7 @@ type registerBody struct {
 	DeviceName       string `json:"deviceName"`
 }
 
-// newTestEnv 构造一个接好真实 DB + AccountService + JWT 的测试环境。
+// newTestEnv 构造一个接好真实 DB + AccountService + DeviceService + JWT 的测试环境。
 // DB 基于 t.TempDir()，不碰 ~/.lumina-relay。cleanup 关闭连接。
 func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
@@ -54,6 +55,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	secret := []byte("test-jwt-secret-32-bytes-min!!!")
 	deps := Deps{
 		AccountService: service.NewAccountService(q),
+		DeviceService:  service.NewDeviceService(q),
 		JWTSecret:      secret,
 	}
 	return &testEnv{
@@ -100,6 +102,36 @@ func (e *testEnv) registerAccount(t *testing.T, body registerBody) string {
 		t.Fatalf("解析注册响应失败：%v", err)
 	}
 	return resp.AccountID
+}
+
+// registerAccountWithHash 注册账户并返回 (accountId, recoveryCodeHashHex)。
+// 设备注册测试需用同一 recoveryCodeHash 模拟客户端正确输入。
+func (e *testEnv) registerAccountWithHash(t *testing.T) (string, string) {
+	t.Helper()
+	hashHex := "686173686564" // "hashed" 的 hex，作为约定恢复码哈希
+	accountID := e.registerAccount(t, registerBody{
+		RecoveryCodeHash: hashHex,
+		DekSalt:          "73616c74",
+		DekNonce:         "6e6f6e6365",
+		DekCt:            "6374",
+		DevicePubKey:     "aabb",
+		DeviceName:       "first-device",
+	})
+	return accountID, hashHex
+}
+
+// parseSessionToken 用 env 的 JWT secret 解析 sessionToken，返回 auth.Claims。
+func (e *testEnv) parseSessionToken(token string) (auth.Claims, error) {
+	return auth.ParseToken(e.jwtSecret, token)
+}
+
+// doPOSTRaw 发送原始字节 POST（供非法 JSON 测试用）。
+func (e *testEnv) doPOSTRaw(target string, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, target, bytes.NewBufferString(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	e.router.ServeHTTP(rec, req)
+	return rec
 }
 
 // doGET 是 GET 请求的薄封装（health 测试用）。

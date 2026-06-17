@@ -20,6 +20,11 @@ const (
 FROM accounts
 WHERE account_id = ?`
 
+	// sqlGetAccountRecoveryHash 读取账户的恢复码哈希。账户不存在时返回 sql.ErrNoRows。
+	sqlGetAccountRecoveryHash = `SELECT recovery_code_hash
+FROM accounts
+WHERE account_id = ?`
+
 	// sqlCreateDevice 插入一行设备，绑定到已存在的 account。
 	sqlCreateDevice = `INSERT INTO devices (
     device_id, account_id, device_pub_key, device_name, created_at
@@ -92,6 +97,15 @@ func (q *Queries) GetAccountDEK(ctx context.Context, accountID string) (AccountD
 		return AccountDEKRow{}, fmt.Errorf("读取账户 DEK：%w", err)
 	}
 	return row, nil
+}
+
+// GetAccountRecoveryHash 读取账户的恢复码哈希。账户不存在时返回 sql.ErrNoRows。
+func (q *Queries) GetAccountRecoveryHash(ctx context.Context, accountID string) ([]byte, error) {
+	var hash []byte
+	if err := q.db.QueryRowxContext(ctx, sqlGetAccountRecoveryHash, accountID).Scan(&hash); err != nil {
+		return nil, fmt.Errorf("读取恢复码哈希：%w", err)
+	}
+	return hash, nil
 }
 
 // CreateDeviceParams 是 CreateDevice 的入参。
