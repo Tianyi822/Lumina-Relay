@@ -16,11 +16,12 @@ import (
 //
 // 集中在 Deps 而非全局变量，便于测试注入与生命周期管理。
 type Deps struct {
-	AccountService *service.AccountService
-	DeviceService  *service.DeviceService
-	JWTSecret      []byte           // 签发/解析 session token 的 HS256 密钥
-	Queries        *db.Queries      // 数据访问（session 中间件查设备用）
-	NonceStore     *auth.NonceStore // 写操作签名防重放
+	AccountService  *service.AccountService
+	DeviceService   *service.DeviceService
+	ManifestService *service.ManifestService
+	JWTSecret       []byte           // 签发/解析 session token 的 HS256 密钥
+	Queries         *db.Queries      // 数据访问（session 中间件查设备用）
+	NonceStore      *auth.NonceStore // 写操作签名防重放
 }
 
 // NewRouter 基于 deps 构造 *gin.Engine 并注册全部已实现的路由。
@@ -47,6 +48,15 @@ func NewRouter(deps Deps) *gin.Engine {
 		middleware.RequireSession(deps.Queries, deps.JWTSecret),
 		middleware.RequireSignedWrite(deps.NonceStore),
 		DeleteDevice(deps))
+	// GET /manifest 取最新 manifest（Session 认证，sync-design §592）
+	r.GET("/manifest",
+		middleware.RequireSession(deps.Queries, deps.JWTSecret),
+		GetManifest(deps))
+	// PUT /manifest 乐观并发提交（Session + Signed，sync-design §593/643）
+	r.PUT("/manifest",
+		middleware.RequireSession(deps.Queries, deps.JWTSecret),
+		middleware.RequireSignedWrite(deps.NonceStore),
+		PutManifest(deps))
 	return r
 }
 

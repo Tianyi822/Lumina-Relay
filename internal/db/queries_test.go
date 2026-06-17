@@ -226,3 +226,46 @@ func TestQueries_RevokeDevice(t *testing.T) {
 		t.Fatalf("幂等后 revoked_at 被覆盖为 %d, want 500", dev.RevokedAt.Int64)
 	}
 }
+
+// TestQueries_ManifestCAS 验证 manifest 的 Insert + CAS Update + Get 全链路。
+func TestQueries_ManifestCAS(t *testing.T) {
+	q, cleanup := openTestQueries(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedAccount(t, q, "acc-m")
+	if err := q.InsertManifestHead(ctx, "acc-m", 1); err != nil {
+		t.Fatalf("InsertManifestHead 失败：%v", err)
+	}
+
+	// 插入 v1
+	if err := q.InsertManifest(ctx, InsertManifestParams{
+		AccountID: "acc-m", Version: 1, Ciphertext: []byte("ct1"),
+		DeviceID: "d", ReceivedAt: 100,
+	}); err != nil {
+		t.Fatalf("InsertManifest 失败：%v", err)
+	}
+
+	// CAS：expected=0 → 推进到 1
+	n, err := q.UpdateManifestHeadIfExpected(ctx, "acc-m", 0, 1, 100)
+	if err != nil {
+		t.Fatalf("CAS 失败：%v", err)
+	}
+	if n != 1 {
+		t.Fatalf("CAS 受影响行数 = %d, want 1", n)
+	}
+
+	// CAS：expected=0 再来（已到 1）→ 0 行（版本不符）
+	n, _ = q.UpdateManifestHeadIfExpected(ctx, "acc-m", 0, 2, 200)
+	if n != 0 {
+		t.Fatalf("版本不符时 CAS 行数 = %d, want 0", n)
+	}
+
+	// 读取 v1
+	row, err := q.GetManifestByAccount(ctx, "acc-m", 1)
+	if err != nil {
+		t.Fatalf("GetManifestByAccount 失败：%v", err)
+	}
+	if string(row.Ciphertext) != "ct1" {
+		t.Fatalf("ciphertext = %q, want ct1", row.Ciphertext)
+	}
+}

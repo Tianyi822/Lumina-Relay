@@ -52,6 +52,20 @@ VALUES (?, 0, ?)`
 FROM manifest_head
 WHERE account_id = ?`
 
+	// sqlInsertManifest 插入一条 manifest 历史版本。
+	sqlInsertManifest = `INSERT INTO manifests (account_id, version, ciphertext, device_id, received_at)
+VALUES (?, ?, ?, ?, ?)`
+
+	// sqlUpdateManifestHead 推进 head 指针（乐观并发 CAS：仅当 current_version = expected 时更新）。
+	sqlUpdateManifestHead = `UPDATE manifest_head
+SET current_version = ?, updated_at = ?
+WHERE account_id = ? AND current_version = ?`
+
+	// sqlGetManifestByAccount 读取账户指定版本的 manifest。不存在返 sql.ErrNoRows。
+	sqlGetManifestByAccount = `SELECT account_id, version, ciphertext, device_id, received_at
+FROM manifests
+WHERE account_id = ? AND version = ?`
+
 	// sqlCountRows 统计指定表行数。表名为包内白名单常量，禁止用户输入（见 data-layer spec §3.4）。
 	sqlCountRows = `SELECT COUNT(*) FROM %s`
 )
@@ -212,6 +226,59 @@ func (q *Queries) GetManifestHead(ctx context.Context, accountID string) (Manife
 		&row.AccountID, &row.CurrentVersion, &row.UpdatedAt,
 	); err != nil {
 		return ManifestHeadRow{}, fmt.Errorf("读取 manifest_head：%w", err)
+	}
+	return row, nil
+}
+
+// ManifestRow 是 manifests 表的一行。
+type ManifestRow struct {
+	AccountID  string
+	Version    int64
+	Ciphertext []byte
+	DeviceID   string
+	ReceivedAt int64
+}
+
+// InsertManifestParams 是 InsertManifest 的入参。
+type InsertManifestParams struct {
+	AccountID  string
+	Version    int64
+	Ciphertext []byte
+	DeviceID   string
+	ReceivedAt int64
+}
+
+// InsertManifest 插入一条 manifest 历史版本。
+func (q *Queries) InsertManifest(ctx context.Context, p InsertManifestParams) error {
+	_, err := q.db.ExecContext(ctx, sqlInsertManifest,
+		p.AccountID, p.Version, p.Ciphertext, p.DeviceID, p.ReceivedAt)
+	if err != nil {
+		return fmt.Errorf("插入 manifest：%w", err)
+	}
+	return nil
+}
+
+// UpdateManifestHeadIfExpected 是乐观并发 CAS：仅当 head.current_version == expected 时
+// 推进到 newVersion。返回受影响行数（1=成功，0=版本不符）。
+func (q *Queries) UpdateManifestHeadIfExpected(ctx context.Context, accountID string, expected, newVersion, updatedAt int64) (int64, error) {
+	res, err := q.db.ExecContext(ctx, sqlUpdateManifestHead, newVersion, updatedAt, accountID, expected)
+	if err != nil {
+		return 0, fmt.Errorf("更新 manifest_head：%w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("读取受影响行数：%w", err)
+	}
+	return n, nil
+}
+
+// GetManifestByAccount 读取账户指定版本的 manifest。不存在返 sql.ErrNoRows。
+func (q *Queries) GetManifestByAccount(ctx context.Context, accountID string, version int64) (ManifestRow, error) {
+	var row ManifestRow
+	if err := q.db.QueryRowxContext(ctx, sqlGetManifestByAccount, accountID, version).Scan(
+		&row.AccountID, &row.Version, &row.Ciphertext, &row.DeviceID, &row.ReceivedAt,
+	); err != nil {
+		return ManifestRow{}, fmt.Errorf("读取 manifest：%w", err)
 	}
 	return row, nil
 }

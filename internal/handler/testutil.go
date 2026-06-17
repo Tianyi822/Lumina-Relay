@@ -58,11 +58,12 @@ func newTestEnv(t *testing.T) *testEnv {
 	q := db.New(backend)
 	secret := []byte("test-jwt-secret-32-bytes-min!!!")
 	deps := Deps{
-		AccountService: service.NewAccountService(q),
-		DeviceService:  service.NewDeviceService(q),
-		JWTSecret:      secret,
-		Queries:        q,
-		NonceStore:     auth.NewNonceStore(5 * time.Minute),
+		AccountService:  service.NewAccountService(q),
+		DeviceService:   service.NewDeviceService(q),
+		ManifestService: service.NewManifestService(q),
+		JWTSecret:       secret,
+		Queries:         q,
+		NonceStore:      auth.NewNonceStore(5 * time.Minute),
 	}
 	return &testEnv{
 		router:    NewRouter(deps),
@@ -192,20 +193,21 @@ func (e *testEnv) registerSignedAccount(t *testing.T) (string, string, string, e
 // signedPUT 构造合法签名的 PUT 请求并执行。nonceStore 由 env 内部路由持有。
 func (e *testEnv) signedPUT(t *testing.T, token string, priv ed25519.PrivateKey, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
-	return e.signedReq(t, http.MethodPut, token, priv, path, body, "putnonce-fixed-16")
+	return e.signedReq(t, http.MethodPut, token, priv, path, body)
 }
 
 // signedDELETE 构造合法签名的 DELETE 请求并执行。
 func (e *testEnv) signedDELETE(t *testing.T, token string, priv ed25519.PrivateKey, path string) *httptest.ResponseRecorder {
 	t.Helper()
-	return e.signedReq(t, http.MethodDelete, token, priv, path, "", "delnonce-fixed-16")
+	return e.signedReq(t, http.MethodDelete, token, priv, path, "")
 }
 
-// signedReq 构造合法签名的请求（共用核心）。
-func (e *testEnv) signedReq(t *testing.T, method, token string, priv ed25519.PrivateKey, path, body, nonceRaw string) *httptest.ResponseRecorder {
+// signedReq 构造合法签名的请求（共用核心）。nonce 每次唯一（用时间纳秒）。
+func (e *testEnv) signedReq(t *testing.T, method, token string, priv ed25519.PrivateKey, path, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	tsStr := strconv.FormatInt(time.Now().UnixMilli(), 10)
-	nonce := hex.EncodeToString([]byte(nonceRaw))
+	// 每次唯一 nonce：时间纳秒 + 计数器，转 hex
+	nonce := strconv.FormatInt(time.Now().UnixNano(), 16)
 	canon := auth.BuildCanonical(method, path, tsStr, nonce, []byte(body))
 	sig := ed25519.Sign(priv, []byte(canon))
 
