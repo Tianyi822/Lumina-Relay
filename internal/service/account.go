@@ -104,3 +104,16 @@ func (s *AccountService) GetDEK(ctx context.Context, accountID string) (DEKEnvel
 	}
 	return DEKEnvelope{Salt: row.DekSalt, Nonce: row.DekNonce, Ct: row.DekCt}, nil
 }
+
+// UpdateDEK 替换账户的 DEK 信封（改主密码场景，sync-design §277-280）。
+// dek 为新信封字段。改密码不碰任何已加密数据块。
+func (s *AccountService) UpdateDEK(ctx context.Context, accountID string, dek DEKEnvelope) error {
+	if err := s.q.UpdateAccountDEK(ctx, accountID, db.UpdateAccountDEKParams{
+		DekSalt:  dek.Salt,
+		DekNonce: dek.Nonce,
+		DekCt:    dek.Ct,
+	}); err != nil {
+		return fmt.Errorf("更新 DEK：%w", err)
+	}
+	return nil
+}

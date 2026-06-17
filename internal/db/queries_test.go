@@ -186,3 +186,43 @@ func TestQueries_GetAccountRecoveryHash_NotFound(t *testing.T) {
 		t.Fatal("账户不存在应报错")
 	}
 }
+
+// TestQueries_RevokeDevice 验证吊销置 revoked_at，且幂等（再次吊销返 0）。
+func TestQueries_RevokeDevice(t *testing.T) {
+	q, cleanup := openTestQueries(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedAccount(t, q, "acc-rev")
+	if err := q.CreateDevice(ctx, CreateDeviceParams{
+		DeviceID: "dev-rev", AccountID: "acc-rev",
+		DevicePubKey: "p", DeviceName: "n", CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("CreateDevice 失败：%v", err)
+	}
+
+	n, err := q.RevokeDevice(ctx, "dev-rev", 500)
+	if err != nil {
+		t.Fatalf("RevokeDevice 失败：%v", err)
+	}
+	if n != 1 {
+		t.Fatalf("首次吊销受影响行数 = %d, want 1", n)
+	}
+	// 验证 revoked_at 已写入
+	dev, _ := q.GetDevice(ctx, "dev-rev")
+	if !dev.RevokedAt.Valid || dev.RevokedAt.Int64 != 500 {
+		t.Fatalf("revoked_at = %v, want 500", dev.RevokedAt)
+	}
+
+	// 幂等：再次吊销应返 0（不覆盖原值）
+	n, err = q.RevokeDevice(ctx, "dev-rev", 999)
+	if err != nil {
+		t.Fatalf("二次 RevokeDevice 失败：%v", err)
+	}
+	if n != 0 {
+		t.Fatalf("二次吊销受影响行数 = %d, want 0", n)
+	}
+	dev, _ = q.GetDevice(ctx, "dev-rev")
+	if dev.RevokedAt.Int64 != 500 {
+		t.Fatalf("幂等后 revoked_at 被覆盖为 %d, want 500", dev.RevokedAt.Int64)
+	}
+}

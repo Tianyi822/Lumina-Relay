@@ -89,3 +89,32 @@ func RegisterDevice(deps Deps) gin.HandlerFunc {
 		})
 	}
 }
+
+// DeleteDevice 返回 DELETE /device/:deviceId 的 gin handler。
+// 前置依赖 RequireSession + RequireSignedWrite。
+// 吊销指定设备，幂等。见 sync-design §288-289。
+func DeleteDevice(deps Deps) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		deviceID := c.Param("deviceId")
+		if deviceID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+				"code": "bad_request", "message": "缺少 deviceId",
+			}})
+			return
+		}
+
+		if err := deps.DeviceService.RevokeDevice(c.Request.Context(), deviceID); err != nil {
+			if errors.Is(err, service.ErrDeviceNotFound) {
+				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{
+					"code": "device_not_found", "message": "设备不存在",
+				}})
+				return
+			}
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+				"code": "internal_error", "message": "吊销设备失败",
+			}})
+			return
+		}
+		c.Status(http.StatusNoContent)
+	}
+}

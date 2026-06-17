@@ -67,3 +67,20 @@ func (s *DeviceService) RegisterDevice(ctx context.Context, in DeviceRegisterInp
 	}
 	return DeviceRegisterOutput{DeviceID: deviceID}, nil
 }
+
+// ErrDeviceNotFound 表示设备不存在或已吊销。handler 据此映射 404。
+var ErrDeviceNotFound = errors.New("device not found")
+
+// RevokeDevice 吊销指定设备（置 revoked_at）。幂等。
+// 设备不存在或已吊销均返回 ErrDeviceNotFound（对客户端语义一致：已无效）。
+// 见 sync-design §288-289。
+func (s *DeviceService) RevokeDevice(ctx context.Context, deviceID string) error {
+	n, err := s.q.RevokeDevice(ctx, deviceID, time.Now().Unix())
+	if err != nil {
+		return fmt.Errorf("吊销设备：%w", err)
+	}
+	if n == 0 {
+		return ErrDeviceNotFound
+	}
+	return nil
+}

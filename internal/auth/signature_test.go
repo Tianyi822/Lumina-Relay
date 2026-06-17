@@ -76,6 +76,46 @@ func TestVerifySignature_WrongKey(t *testing.T) {
 	}
 }
 
+// TestDecodePublicKey_Valid 验证合法公钥 hex 解码。
+func TestDecodePublicKey_Valid(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(nil)
+	got, err := DecodePublicKey(hex.EncodeToString(pub))
+	if err != nil {
+		t.Fatalf("合法公钥应解码成功：%v", err)
+	}
+	if !bytesEqual(got, pub) {
+		t.Fatal("解码后公钥不匹配")
+	}
+}
+
+// TestDecodePublicKey_BadHex 验证非法 hex 报错。
+func TestDecodePublicKey_BadHex(t *testing.T) {
+	if _, err := DecodePublicKey("zz"); err == nil {
+		t.Fatal("非法 hex 应报错")
+	}
+}
+
+// TestDecodePublicKey_BadLength 验证长度不符报错。
+func TestDecodePublicKey_BadLength(t *testing.T) {
+	// 合法 hex 但长度不够
+	if _, err := DecodePublicKey("abcd"); err == nil {
+		t.Fatal("长度不符应报错")
+	}
+}
+
+// bytesEqual 是测试 helper，避免引入 bytes 包。
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // hexSHA256 是测试 helper，独立计算 sha256 hex 以交叉校验实现。
 func hexSHA256(b []byte) string {
 	sum := sha256.Sum256(b)

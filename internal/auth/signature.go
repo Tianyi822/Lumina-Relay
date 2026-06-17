@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"strings"
 )
 
@@ -32,4 +33,17 @@ func VerifySignature(pubKey ed25519.PublicKey, canonical, sigHex string) bool {
 		return false
 	}
 	return ed25519.Verify(pubKey, []byte(canonical), sig)
+}
+
+// DecodePublicKey 从 hex 字符串解码 Ed25519 公钥。
+// 供中间件从 devices.device_pub_key 字段解析。长度不合法时返回错误。
+func DecodePublicKey(hexKey string) (ed25519.PublicKey, error) {
+	raw, err := hex.DecodeString(hexKey)
+	if err != nil {
+		return nil, fmt.Errorf("公钥 hex 解码：%w", err)
+	}
+	if len(raw) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("公钥长度非法：got %d bytes, want %d", len(raw), ed25519.PublicKeySize)
+	}
+	return ed25519.PublicKey(raw), nil
 }

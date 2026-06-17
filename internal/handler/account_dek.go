@@ -54,3 +54,64 @@ func GetAccountDEK(deps Deps) gin.HandlerFunc {
 		}})
 	}
 }
+
+// putDekRequest 是 PUT /account/dek 的请求体（新 dekEnvelope，hex）。
+type putDekRequest struct {
+	DekSalt  string `json:"dekSalt" binding:"required"`
+	DekNonce string `json:"dekNonce" binding:"required"`
+	DekCt    string `json:"dekCt" binding:"required"`
+}
+
+// PutAccountDEK 返回 PUT /account/dek 的 gin handler。
+// 前置依赖 RequireSession + RequireSignedWrite（路由层挂载）。
+// 从 context 取 accountId（session 注入），替换该账户的 dekEnvelope。
+func PutAccountDEK(deps Deps) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		accountID := c.GetString("accountId")
+		if accountID == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{
+				"code": "unauthorized", "message": "session missing",
+			}})
+			return
+		}
+
+		var req putDekRequest
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+				"code": "bad_request", "message": "请求体格式错误",
+			}})
+			return
+		}
+		salt, err := hex.DecodeString(req.DekSalt)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+				"code": "bad_request", "message": "dekSalt 不是合法 hex",
+			}})
+			return
+		}
+		nonce, err := hex.DecodeString(req.DekNonce)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+				"code": "bad_request", "message": "dekNonce 不是合法 hex",
+			}})
+			return
+		}
+		ct, err := hex.DecodeString(req.DekCt)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+				"code": "bad_request", "message": "dekCt 不是合法 hex",
+			}})
+			return
+		}
+
+		if err := deps.AccountService.UpdateDEK(c.Request.Context(), accountID, service.DEKEnvelope{
+			Salt: salt, Nonce: nonce, Ct: ct,
+		}); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+				"code": "internal_error", "message": "更新 DEK 失败",
+			}})
+			return
+		}
+		c.Status(http.StatusNoContent)
+	}
+}

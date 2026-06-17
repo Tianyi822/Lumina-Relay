@@ -25,6 +25,11 @@ WHERE account_id = ?`
 FROM accounts
 WHERE account_id = ?`
 
+	// sqlUpdateAccountDEK 替换账户的 DEK 信封（改主密码场景，sync-design §280）。
+	sqlUpdateAccountDEK = `UPDATE accounts
+SET dek_salt = ?, dek_nonce = ?, dek_ct = ?
+WHERE account_id = ?`
+
 	// sqlCreateDevice 插入一行设备，绑定到已存在的 account。
 	sqlCreateDevice = `INSERT INTO devices (
     device_id, account_id, device_pub_key, device_name, created_at
@@ -34,6 +39,9 @@ WHERE account_id = ?`
 	sqlGetDevice = `SELECT device_id, account_id, device_pub_key, device_name, created_at, revoked_at
 FROM devices
 WHERE device_id = ?`
+
+	// sqlRevokeDevice 置设备的 revoked_at（吊销）。已吊销则保持原值。
+	sqlRevokeDevice = `UPDATE devices SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL`
 
 	// sqlInsertManifestHead 初始化账户的 manifest_head（current_version=0）。
 	sqlInsertManifestHead = `INSERT INTO manifest_head (account_id, current_version, updated_at)
@@ -108,6 +116,22 @@ func (q *Queries) GetAccountRecoveryHash(ctx context.Context, accountID string) 
 	return hash, nil
 }
 
+// UpdateAccountDEKParams 是 UpdateAccountDEK 的入参。
+type UpdateAccountDEKParams struct {
+	DekSalt  []byte
+	DekNonce []byte
+	DekCt    []byte
+}
+
+// UpdateAccountDEK 替换账户的 DEK 信封。见 sync-design §280（改密码不碰数据块）。
+func (q *Queries) UpdateAccountDEK(ctx context.Context, accountID string, p UpdateAccountDEKParams) error {
+	_, err := q.db.ExecContext(ctx, sqlUpdateAccountDEK, p.DekSalt, p.DekNonce, p.DekCt, accountID)
+	if err != nil {
+		return fmt.Errorf("更新 DEK：%w", err)
+	}
+	return nil
+}
+
 // CreateDeviceParams 是 CreateDevice 的入参。
 type CreateDeviceParams struct {
 	DeviceID      string
@@ -148,6 +172,20 @@ func (q *Queries) GetDevice(ctx context.Context, deviceID string) (DeviceRow, er
 		return DeviceRow{}, fmt.Errorf("读取设备：%w", err)
 	}
 	return row, nil
+}
+
+// RevokeDevice 置设备的 revoked_at（Unix 秒）。幂等：已吊销的设备保持原值。
+// 返回受影响行数：1 表示本次吊销，0 表示设备不存在或已吊销。
+func (q *Queries) RevokeDevice(ctx context.Context, deviceID string, revokedAt int64) (int64, error) {
+	res, err := q.db.ExecContext(ctx, sqlRevokeDevice, revokedAt, deviceID)
+	if err != nil {
+		return 0, fmt.Errorf("吊销设备：%w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("读取受影响行数：%w", err)
+	}
+	return n, nil
 }
 
 // InsertManifestHead 初始化账户的 manifest_head，current_version 固定为 0。
