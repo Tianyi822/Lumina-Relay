@@ -16,7 +16,7 @@ func main() {
 	logger.Info("lumina-relay 启动中", logger.String("version", version))
 
 	// 3. 加载配置文件系统（走 slog 兜底）
-	appCfg, err := config.Load("config.yaml")
+	appCfg, err := config.LoadDefault()
 	if err != nil {
 		// 配置解析失败：退出（非"文件不存在"的错误才到这里）
 		logger.Error("配置加载失败，退出", logger.Err(err))

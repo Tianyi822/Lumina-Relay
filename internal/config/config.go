@@ -17,9 +17,14 @@ type ServerConfig struct {
 }
 
 // Default 提供全局默认值。每次返回独立实例。
+// 日志文件默认写入 ~/.lumina-relay/logs/lumina-relay.log。
 func Default() AppConfig {
+	logCfg := logger.DefaultConfig()
+	if p, err := DefaultLogPath(); err == nil {
+		logCfg.File.Path = p
+	}
 	return AppConfig{
-		Log:    logger.DefaultConfig(),
+		Log:    logCfg,
 		Server: ServerConfig{Port: 8443, Host: "0.0.0.0"},
 	}
 }

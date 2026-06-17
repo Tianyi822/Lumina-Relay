@@ -27,7 +27,8 @@ func writeTempYAML(t *testing.T, name, content string) string {
 }
 
 func TestLoad_FileNotExists_UsesDefaults(t *testing.T) {
-	cfg, err := Load(filepath.Join(t.TempDir(), "nope.yaml"))
+	path := filepath.Join(t.TempDir(), "nope.yaml")
+	cfg, err := Load(path)
 	if err != nil {
 		t.Fatalf("文件不存在不应报错：%v", err)
 	}
@@ -36,6 +37,9 @@ func TestLoad_FileNotExists_UsesDefaults(t *testing.T) {
 	}
 	if cfg.Log.Level != "info" {
 		t.Fatalf("应回退默认 Level，got %q", cfg.Log.Level)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("首次加载应写入默认配置文件：%v", err)
 	}
 }
 
@@ -139,21 +143,39 @@ func TestLoad_EnvOverridesLog(t *testing.T) {
 	}
 }
 
-// 黄金配置文件冒烟：仓库根的 config.yaml 必须存在且是合法 YAML。
-// Red 阶段：文件尚未创建 → ReadFile 失败 → 测试失败。
-// 注意：测试运行目录是 internal/config/，仓库根在相对路径 ../../。
-func TestGoldenConfigFile_IsValidYAML(t *testing.T) {
-	path := filepath.Join("..", "..", "config.yaml")
-	data, err := os.ReadFile(path)
+// 默认配置路径：~/.lumina-relay/config.yaml 不存在时写入默认配置。
+func TestLoadDefault_MissingFile_WritesDefaults(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfg, err := LoadDefault()
 	if err != nil {
-		t.Fatalf("config.yaml 不存在或不可读（应随仓库提交）：%v", err)
+		t.Fatalf("未期望错误：%v", err)
 	}
-	var cfg AppConfig
-	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		t.Fatalf("config.yaml 解析失败：%v", err)
+	if cfg.Server.Port != 8443 {
+		t.Fatalf("应回退默认 Port，got %d", cfg.Server.Port)
 	}
-	// 默认配置的关键字段（与 Default() 一致）
-	if cfg.Server.Port != 8443 || cfg.Log.Level != "info" || !cfg.Log.File.Enabled {
-		t.Fatalf("config.yaml 值与预期不符：%+v", cfg)
+	if cfg.Log.Level != "info" {
+		t.Fatalf("应回退默认 Level，got %q", cfg.Log.Level)
+	}
+	wantLog := filepath.Join(home, ".lumina-relay", "logs", "lumina-relay.log")
+	if cfg.Log.File.Path != wantLog {
+		t.Fatalf("Log.File.Path = %q, want %q", cfg.Log.File.Path, wantLog)
+	}
+
+	configPath := filepath.Join(home, ".lumina-relay", "config.yaml")
+	if _, err := os.Stat(configPath); err != nil {
+		t.Fatalf("首次启动应创建 config.yaml：%v", err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("读取写入的配置失败：%v", err)
+	}
+	var written AppConfig
+	if err := yaml.Unmarshal(data, &written); err != nil {
+		t.Fatalf("写入的配置无法解析：%v", err)
+	}
+	if written.Server.Port != 8443 || written.Log.Level != "info" || !written.Log.File.Enabled {
+		t.Fatalf("写入的配置值不符：%+v", written)
 	}
 }

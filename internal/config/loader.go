@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"gopkg.in/yaml.v3"
@@ -11,7 +12,7 @@ import (
 )
 
 // Load 从 path 读取并解析配置。
-//   - 文件不存在：用默认值启动，记录 info（非错误）。
+//   - 文件不存在：写入默认配置到 path，记录 info（非错误）。
 //   - 文件存在但解析失败：返回 error，main 应退出（格式错可能波及业务配置）。
 //   - 成功：合并默认值（缺失字段补默认）→ env 覆盖 → 返回。
 //
@@ -22,8 +23,10 @@ func Load(path string) (AppConfig, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			logger.Info("配置文件不存在，使用默认配置", logger.String("path", path))
-			// 文件不存在不算错误，仍走 env 覆盖 + 默认值
+			if err := writeDefaultConfig(path); err != nil {
+				return cfg, err
+			}
+			logger.Info("配置文件不存在，已写入默认配置", logger.String("path", path))
 			return applyEnv(cfg), nil
 		}
 		// 其他读取错误（权限等）
@@ -35,6 +38,31 @@ func Load(path string) (AppConfig, error) {
 	}
 
 	return applyEnv(cfg), nil
+}
+
+// writeDefaultConfig 将 Default() 序列化写入 path，并创建父目录。
+func writeDefaultConfig(path string) error {
+	cfg := Default()
+	data, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("序列化默认配置失败: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("创建配置目录失败: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("写入默认配置失败: %w", err)
+	}
+	return nil
+}
+
+// LoadDefault 从 ~/.lumina-relay/config.yaml 加载配置。
+func LoadDefault() (AppConfig, error) {
+	path, err := DefaultConfigPath()
+	if err != nil {
+		return AppConfig{}, fmt.Errorf("无法确定配置路径: %w", err)
+	}
+	return Load(path)
 }
 
 // applyEnv 对各配置段应用环境变量覆盖（env 优先级最高）。

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"path/filepath"
 	"testing"
 
 	"lumina-relay/internal/logger"
@@ -19,6 +20,17 @@ func TestDefault(t *testing.T) {
 	}
 	if !cfg.Log.File.Enabled {
 		t.Fatal("Log.File.Enabled 应为 true")
+	}
+}
+
+func TestDefault_LogPathUnderDataDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	cfg := Default()
+	want := filepath.Join(home, ".lumina-relay", "logs", "lumina-relay.log")
+	if cfg.Log.File.Path != want {
+		t.Fatalf("Log.File.Path = %q, want %q", cfg.Log.File.Path, want)
 	}
 }
 
