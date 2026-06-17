@@ -43,3 +43,29 @@ func TestDefaultLogPath(t *testing.T) {
 		t.Fatalf("DefaultLogPath = %q", path)
 	}
 }
+
+func TestDefaultDBPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	path, err := DefaultDBPath()
+	if err != nil {
+		t.Fatalf("未期望错误：%v", err)
+	}
+	if path != filepath.Join(home, ".lumina-relay", "db", "relay.db") {
+		t.Fatalf("DefaultDBPath = %q", path)
+	}
+}
+
+func TestDefaultBlocksDir(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	dir, err := DefaultBlocksDir()
+	if err != nil {
+		t.Fatalf("未期望错误：%v", err)
+	}
+	if dir != filepath.Join(home, ".lumina-relay", "blocks") {
+		t.Fatalf("DefaultBlocksDir = %q", dir)
+	}
+}

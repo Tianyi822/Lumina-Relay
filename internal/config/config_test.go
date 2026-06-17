@@ -47,3 +47,10 @@ func TestAppConfigEmbedsLogConfig(t *testing.T) {
 	// 确保 AppConfig.Log 类型确实是 logger.LogConfig（编译期保证）
 	var _ logger.LogConfig = Default().Log
 }
+
+func TestDefault_StorageQuota(t *testing.T) {
+	cfg := Default()
+	if cfg.Storage.QuotaMB != 1024 {
+		t.Fatalf("Storage.QuotaMB = %d, want 1024", cfg.Storage.QuotaMB)
+	}
+}

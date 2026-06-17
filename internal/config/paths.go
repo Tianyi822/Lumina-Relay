@@ -33,3 +33,21 @@ func DefaultLogPath() (string, error) {
 	}
 	return filepath.Join(dir, "logs", "lumina-relay.log"), nil
 }
+
+// DefaultDBPath 返回默认数据库文件路径（~/.lumina-relay/db/relay.db）。
+func DefaultDBPath() (string, error) {
+	dir, err := DataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "db", "relay.db"), nil
+}
+
+// DefaultBlocksDir 返回默认密文块存储目录（~/.lumina-relay/blocks）。
+func DefaultBlocksDir() (string, error) {
+	dir, err := DataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "blocks"), nil
+}
