@@ -4,6 +4,7 @@ go 1.26
 
 require (
 	github.com/golang-migrate/migrate/v4 v4.19.1
+	github.com/jmoiron/sqlx v1.4.0
 	go.uber.org/zap v1.28.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1
