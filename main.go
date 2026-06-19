@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -20,9 +19,6 @@ import (
 )
 
 const version = "0.1.0"
-
-// jwtSecretLen 是 HS256 签名密钥的字节数（≥32 满足 HMAC-SHA256 安全要求）。
-const jwtSecretLen = 32
 
 func main() {
 	// 1. panic 兜底：第一行，保证任何 panic 都有记录
@@ -107,11 +103,16 @@ func runServer(cfg config.AppConfig) {
 	defer backend.Close()
 	q := db.New(backend)
 
-	// JWT secret：启动时随机生成（进程重启后既有 session 全部失效）。
-	// 自托管个人场景可接受；未来可加环境变量覆盖（YAGNI）。
-	jwtSecret := make([]byte, jwtSecretLen)
-	if _, err := rand.Read(jwtSecret); err != nil {
-		logger.Error("生成 JWT 密钥失败，退出", logger.Err(err))
+	// JWT secret：首次启动随机生成并持久化到 ~/.lumina-relay/jwt_secret，
+	// 后续启动复用同一密钥。多用户场景下避免重启全员登出。
+	jwtSecretPath, err := config.DefaultJWTSecretPath()
+	if err != nil {
+		logger.Error("解析 JWT 密钥路径失败，退出", logger.Err(err))
+		return
+	}
+	jwtSecret, err := auth.LoadOrGenerateSecret(jwtSecretPath)
+	if err != nil {
+		logger.Error("加载或生成 JWT 密钥失败，退出", logger.Err(err))
 		return
 	}
 

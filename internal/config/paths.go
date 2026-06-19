@@ -43,6 +43,15 @@ func DefaultDBPath() (string, error) {
 	return filepath.Join(dir, "db", "relay.db"), nil
 }
 
+// DefaultJWTSecretPath 返回 JWT 签名密钥文件路径（~/.lumina-relay/jwt_secret）。
+func DefaultJWTSecretPath() (string, error) {
+	dir, err := DataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "jwt_secret"), nil
+}
+
 // DefaultBlocksDir 返回默认密文块存储目录（~/.lumina-relay/blocks）。
 func DefaultBlocksDir() (string, error) {
 	dir, err := DataDir()
