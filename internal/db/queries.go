@@ -25,23 +25,39 @@ WHERE account_id = ?`
 FROM accounts
 WHERE account_id = ?`
 
+	// sqlGetAccountByRecoveryHash 按恢复码哈希反查账户（含 accountId + DEK）。
+	// 供 GET /account/dek?recoveryCodeHash= 使用（换设备流程）。
+	sqlGetAccountByRecoveryHash = `SELECT account_id, dek_salt, dek_nonce, dek_ct
+FROM accounts
+WHERE recovery_code_hash = ?`
+
 	// sqlUpdateAccountDEK 替换账户的 DEK 信封（改主密码场景，sync-design §280）。
 	sqlUpdateAccountDEK = `UPDATE accounts
 SET dek_salt = ?, dek_nonce = ?, dek_ct = ?
 WHERE account_id = ?`
 
 	// sqlCreateDevice 插入一行设备，绑定到已存在的 account。
+	// last_seen_at 初始等于 created_at（注册即"活跃过一次"）。
 	sqlCreateDevice = `INSERT INTO devices (
-    device_id, account_id, device_pub_key, device_name, created_at
-) VALUES (?, ?, ?, ?, ?)`
+    device_id, account_id, device_pub_key, device_name, created_at, last_seen_at
+) VALUES (?, ?, ?, ?, ?, ?)`
 
 	// sqlGetDevice 读取设备记录。不存在时返回 sql.ErrNoRows。
-	sqlGetDevice = `SELECT device_id, account_id, device_pub_key, device_name, created_at, revoked_at
+	sqlGetDevice = `SELECT device_id, account_id, device_pub_key, device_name, created_at, revoked_at, last_seen_at
 FROM devices
 WHERE device_id = ?`
 
 	// sqlRevokeDevice 置设备的 revoked_at（吊销）。已吊销则保持原值。
 	sqlRevokeDevice = `UPDATE devices SET revoked_at = ? WHERE device_id = ? AND revoked_at IS NULL`
+
+	// sqlTouchDeviceLastSeen 更新设备最后活跃时间（Session 认证成功时调用）。
+	sqlTouchDeviceLastSeen = `UPDATE devices SET last_seen_at = ? WHERE device_id = ?`
+
+	// sqlListDevicesByAccount 列出账户下未吊销设备，按创建时间升序。
+	sqlListDevicesByAccount = `SELECT device_id, device_name, device_pub_key, created_at, last_seen_at
+FROM devices
+WHERE account_id = ? AND revoked_at IS NULL
+ORDER BY created_at`
 
 	// sqlInsertManifestHead 初始化账户的 manifest_head（current_version=0）。
 	sqlInsertManifestHead = `INSERT INTO manifest_head (account_id, current_version, updated_at)
@@ -168,10 +184,10 @@ type CreateDeviceParams struct {
 	CreatedAt     int64
 }
 
-// CreateDevice 插入一行设备记录。
+// CreateDevice 插入一行设备记录。last_seen_at 初始化为 CreatedAt。
 func (q *Queries) CreateDevice(ctx context.Context, p CreateDeviceParams) error {
 	_, err := q.db.ExecContext(ctx, sqlCreateDevice,
-		p.DeviceID, p.AccountID, p.DevicePubKey, p.DeviceName, p.CreatedAt)
+		p.DeviceID, p.AccountID, p.DevicePubKey, p.DeviceName, p.CreatedAt, p.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("插入设备：%w", err)
 	}
@@ -180,6 +196,7 @@ func (q *Queries) CreateDevice(ctx context.Context, p CreateDeviceParams) error 
 
 // DeviceRow 是 GetDevice 的返回行。
 // RevokedAt 用 sql.NullInt64 表达可空的吊销时间戳。
+// LastSeenAt 由迁移保证非 NULL（回填 + CreateDevice 写入）。
 type DeviceRow struct {
 	DeviceID     string
 	AccountID    string
@@ -187,6 +204,7 @@ type DeviceRow struct {
 	DeviceName   string
 	CreatedAt    int64
 	RevokedAt    sql.NullInt64
+	LastSeenAt   int64
 }
 
 // GetDevice 读取设备记录。设备不存在时返回 sql.ErrNoRows。
@@ -194,7 +212,7 @@ func (q *Queries) GetDevice(ctx context.Context, deviceID string) (DeviceRow, er
 	var row DeviceRow
 	if err := q.db.QueryRowxContext(ctx, sqlGetDevice, deviceID).Scan(
 		&row.DeviceID, &row.AccountID, &row.DevicePubKey, &row.DeviceName,
-		&row.CreatedAt, &row.RevokedAt,
+		&row.CreatedAt, &row.RevokedAt, &row.LastSeenAt,
 	); err != nil {
 		return DeviceRow{}, fmt.Errorf("读取设备：%w", err)
 	}
@@ -213,6 +231,66 @@ func (q *Queries) RevokeDevice(ctx context.Context, deviceID string, revokedAt i
 		return 0, fmt.Errorf("读取受影响行数：%w", err)
 	}
 	return n, nil
+}
+
+// TouchDeviceLastSeen 更新设备的 last_seen_at（Unix 秒）。供 Session 中间件在认证成功后调用。
+func (q *Queries) TouchDeviceLastSeen(ctx context.Context, deviceID string, ts int64) error {
+	if _, err := q.db.ExecContext(ctx, sqlTouchDeviceLastSeen, ts, deviceID); err != nil {
+		return fmt.Errorf("更新设备活跃时间：%w", err)
+	}
+	return nil
+}
+
+// DeviceListRow 是 ListDevicesByAccount 的返回行（不含已吊销设备）。
+type DeviceListRow struct {
+	DeviceID     string
+	DeviceName   string
+	DevicePubKey string
+	CreatedAt    int64
+	LastSeenAt   int64
+}
+
+// ListDevicesByAccount 列出账户下所有未吊销设备，按创建时间升序。
+func (q *Queries) ListDevicesByAccount(ctx context.Context, accountID string) ([]DeviceListRow, error) {
+	rows, err := q.db.QueryxContext(ctx, sqlListDevicesByAccount, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("列出设备：%w", err)
+	}
+	defer rows.Close()
+	var out []DeviceListRow
+	for rows.Next() {
+		var r DeviceListRow
+		if err := rows.Scan(
+			&r.DeviceID, &r.DeviceName, &r.DevicePubKey, &r.CreatedAt, &r.LastSeenAt,
+		); err != nil {
+			return nil, fmt.Errorf("扫描设备行：%w", err)
+		}
+		out = append(out, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历设备行：%w", err)
+	}
+	return out, nil
+}
+
+// AccountByRecoveryRow 是按恢复码哈希反查的返回行。
+type AccountByRecoveryRow struct {
+	AccountID string
+	DekSalt   []byte
+	DekNonce  []byte
+	DekCt     []byte
+}
+
+// GetAccountByRecoveryHash 按恢复码哈希反查账户，返回 accountId + DEK 信封。
+// 账户不存在时返回 sql.ErrNoRows。
+func (q *Queries) GetAccountByRecoveryHash(ctx context.Context, hash []byte) (AccountByRecoveryRow, error) {
+	var row AccountByRecoveryRow
+	if err := q.db.QueryRowxContext(ctx, sqlGetAccountByRecoveryHash, hash).Scan(
+		&row.AccountID, &row.DekSalt, &row.DekNonce, &row.DekCt,
+	); err != nil {
+		return AccountByRecoveryRow{}, fmt.Errorf("按恢复码反查账户：%w", err)
+	}
+	return row, nil
 }
 
 // InsertManifestHead 初始化账户的 manifest_head，current_version 固定为 0。

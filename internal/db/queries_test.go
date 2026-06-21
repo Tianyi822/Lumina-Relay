@@ -187,6 +187,128 @@ func TestQueries_GetAccountRecoveryHash_NotFound(t *testing.T) {
 	}
 }
 
+// TestQueries_GetAccountByRecoveryHash 验证按恢复码哈希反查账户，
+// 返回 accountId + DEK 信封字段。
+func TestQueries_GetAccountByRecoveryHash(t *testing.T) {
+	q, cleanup := openTestQueries(t)
+	defer cleanup()
+	ctx := context.Background()
+	wantHash := []byte("recovery-lookup")
+	if err := q.CreateAccount(ctx, CreateAccountParams{
+		AccountID:        "acc-lookup",
+		RecoveryCodeHash: wantHash,
+		DekSalt:          []byte("s2"),
+		DekNonce:         []byte("n2"),
+		DekCt:            []byte("c2"),
+		CreatedAt:        1,
+	}); err != nil {
+		t.Fatalf("CreateAccount 失败：%v", err)
+	}
+
+	row, err := q.GetAccountByRecoveryHash(ctx, wantHash)
+	if err != nil {
+		t.Fatalf("GetAccountByRecoveryHash 失败：%v", err)
+	}
+	if row.AccountID != "acc-lookup" {
+		t.Errorf("AccountID = %q, want acc-lookup", row.AccountID)
+	}
+	if !bytes.Equal(row.DekSalt, []byte("s2")) || !bytes.Equal(row.DekNonce, []byte("n2")) || !bytes.Equal(row.DekCt, []byte("c2")) {
+		t.Errorf("DEK 字段不匹配：%+v", row)
+	}
+}
+
+// TestQueries_GetAccountByRecoveryHash_NotFound 验证查无此户返回错误。
+func TestQueries_GetAccountByRecoveryHash_NotFound(t *testing.T) {
+	q, cleanup := openTestQueries(t)
+	defer cleanup()
+	if _, err := q.GetAccountByRecoveryHash(context.Background(), []byte("nope")); err == nil {
+		t.Fatal("查无此户应报错")
+	}
+}
+
+// TestQueries_CreateDevice_SetsLastSeenAt 验证新建设备时 last_seen_at 等于 created_at，
+// GetDevice 能读回该字段。
+func TestQueries_CreateDevice_SetsLastSeenAt(t *testing.T) {
+	q, cleanup := openTestQueries(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedAccount(t, q, "acc-ls")
+
+	if err := q.CreateDevice(ctx, CreateDeviceParams{
+		DeviceID: "dev-ls", AccountID: "acc-ls",
+		DevicePubKey: "p", DeviceName: "n", CreatedAt: 777,
+	}); err != nil {
+		t.Fatalf("CreateDevice 失败：%v", err)
+	}
+	dev, err := q.GetDevice(ctx, "dev-ls")
+	if err != nil {
+		t.Fatalf("GetDevice 失败：%v", err)
+	}
+	if dev.LastSeenAt != 777 {
+		t.Fatalf("last_seen_at = %d, want 777（应等于 created_at）", dev.LastSeenAt)
+	}
+}
+
+// TestQueries_TouchDeviceLastSeen 验证更新 last_seen_at 生效。
+func TestQueries_TouchDeviceLastSeen(t *testing.T) {
+	q, cleanup := openTestQueries(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedAccount(t, q, "acc-touch")
+	if err := q.CreateDevice(ctx, CreateDeviceParams{
+		DeviceID: "dev-touch", AccountID: "acc-touch",
+		DevicePubKey: "p", DeviceName: "n", CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("CreateDevice 失败：%v", err)
+	}
+	if err := q.TouchDeviceLastSeen(ctx, "dev-touch", 999); err != nil {
+		t.Fatalf("TouchDeviceLastSeen 失败：%v", err)
+	}
+	dev, _ := q.GetDevice(ctx, "dev-touch")
+	if dev.LastSeenAt != 999 {
+		t.Fatalf("last_seen_at = %d, want 999", dev.LastSeenAt)
+	}
+}
+
+// TestQueries_ListDevicesByAccount 验证列出未吊销设备，且已吊销设备被过滤，按 created_at 升序。
+func TestQueries_ListDevicesByAccount(t *testing.T) {
+	q, cleanup := openTestQueries(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedAccount(t, q, "acc-list")
+	// 两台活跃设备（created_at 升序：dev-a=1, dev-b=2）
+	if err := q.CreateDevice(ctx, CreateDeviceParams{DeviceID: "dev-a", AccountID: "acc-list", DevicePubKey: "ka", DeviceName: "A", CreatedAt: 1}); err != nil {
+		t.Fatalf("建 dev-a 失败：%v", err)
+	}
+	if err := q.CreateDevice(ctx, CreateDeviceParams{DeviceID: "dev-b", AccountID: "acc-list", DevicePubKey: "kb", DeviceName: "B", CreatedAt: 2}); err != nil {
+		t.Fatalf("建 dev-b 失败：%v", err)
+	}
+	// 一台已吊销设备
+	if err := q.CreateDevice(ctx, CreateDeviceParams{DeviceID: "dev-c", AccountID: "acc-list", DevicePubKey: "kc", DeviceName: "C", CreatedAt: 3}); err != nil {
+		t.Fatalf("建 dev-c 失败：%v", err)
+	}
+	if _, err := q.RevokeDevice(ctx, "dev-c", 500); err != nil {
+		t.Fatalf("吊销 dev-c 失败：%v", err)
+	}
+
+	rows, err := q.ListDevicesByAccount(ctx, "acc-list")
+	if err != nil {
+		t.Fatalf("ListDevicesByAccount 失败：%v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("设备数 = %d, want 2（应排除已吊销）", len(rows))
+	}
+	if rows[0].DeviceID != "dev-a" || rows[1].DeviceID != "dev-b" {
+		t.Fatalf("顺序错误：%+v", rows)
+	}
+	if rows[0].DeviceName != "A" || rows[0].DevicePubKey != "ka" {
+		t.Errorf("字段不匹配：%+v", rows[0])
+	}
+	if rows[0].LastSeenAt != 1 {
+		t.Errorf("dev-a last_seen_at = %d, want 1", rows[0].LastSeenAt)
+	}
+}
+
 // TestQueries_RevokeDevice 验证吊销置 revoked_at，且幂等（再次吊销返 0）。
 func TestQueries_RevokeDevice(t *testing.T) {
 	q, cleanup := openTestQueries(t)
