@@ -37,6 +37,10 @@ func NewRouter(deps Deps) *gin.Engine {
 	// POST /device/register 限流 5次/分钟/IP（防恢复码爆破，sync-design §697）
 	deviceLimiter := middleware.NewIPLimiter(5, time.Minute)
 	r.POST("/device/register", middleware.IPLimit(deviceLimiter), RegisterDevice(deps))
+	// GET /devices 列出账户下未吊销设备（Session 认证，读操作）
+	r.GET("/devices",
+		middleware.RequireSession(deps.Queries, deps.JWTSecret),
+		ListDevices(deps))
 
 	// 写操作：双层认证（Session + Signed）
 	// PUT /account/dek 改主密码后换 dekEnvelope（sync-design §590）

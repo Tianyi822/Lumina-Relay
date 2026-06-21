@@ -125,3 +125,44 @@ func DeleteDevice(deps Deps) gin.HandlerFunc {
 		c.Status(http.StatusNoContent)
 	}
 }
+
+// deviceListItem 是 GET /devices 响应数组的单项。
+type deviceListItem struct {
+	DeviceID     string `json:"deviceId"`
+	DeviceName   string `json:"deviceName"`
+	DevicePubKey string `json:"devicePubKey"`
+	CreatedAt    int64  `json:"createdAt"`
+	LastSeenAt   int64  `json:"lastSeenAt"`
+}
+
+// ListDevices 返回 GET /devices 的 gin handler。
+// 前置依赖 RequireSession（路由层挂载）。从 context 取 accountId，列出该账户下未吊销设备。
+func ListDevices(deps Deps) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		accountID := c.GetString("accountId")
+		if accountID == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": gin.H{
+				"code": "unauthorized", "message": "session missing",
+			}})
+			return
+		}
+		devs, err := deps.DeviceService.ListDevices(c.Request.Context(), accountID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+				"code": "internal_error", "message": "列出设备失败",
+			}})
+			return
+		}
+		items := make([]deviceListItem, len(devs))
+		for i, d := range devs {
+			items[i] = deviceListItem{
+				DeviceID:     d.DeviceID,
+				DeviceName:   d.DeviceName,
+				DevicePubKey: d.DevicePubKey,
+				CreatedAt:    d.CreatedAt,
+				LastSeenAt:   d.LastSeenAt,
+			}
+		}
+		c.JSON(http.StatusOK, items)
+	}
+}
