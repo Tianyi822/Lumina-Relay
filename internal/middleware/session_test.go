@@ -150,6 +150,38 @@ func TestRequireSession_BadToken(t *testing.T) {
 	}
 }
 
+// TestRequireSession_UpdatesLastSeen 验证合法 token 通过认证后，
+// DB 中该设备的 last_seen_at 被推进（seed 时 = CreatedAt = 1）。
+func TestRequireSession_UpdatesLastSeen(t *testing.T) {
+	env := newSessionTestEnv(t)
+	defer env.cleanup()
+
+	before, err := env.q.GetDevice(context.Background(), env.deviceID)
+	if err != nil {
+		t.Fatalf("读取设备失败：%v", err)
+	}
+	if before.LastSeenAt != 1 {
+		t.Fatalf("前置 last_seen_at = %d, want 1（seed 值）", before.LastSeenAt)
+	}
+
+	r := gin.New()
+	r.Use(RequireSession(env.q, env.jwtSecret))
+	r.GET("/x", func(c *gin.Context) { c.Status(200) })
+
+	rec := getWithBearer(r, "Bearer "+env.makeToken(t))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("合法 token 应 200，得到 %d", rec.Code)
+	}
+
+	after, err := env.q.GetDevice(context.Background(), env.deviceID)
+	if err != nil {
+		t.Fatalf("再次读取设备失败：%v", err)
+	}
+	if after.LastSeenAt <= before.LastSeenAt {
+		t.Fatalf("last_seen_at 未推进：before=%d after=%d", before.LastSeenAt, after.LastSeenAt)
+	}
+}
+
 // getWithBearer 发 GET，可设 Authorization 头。
 func getWithBearer(r http.Handler, bearer string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/x", nil)

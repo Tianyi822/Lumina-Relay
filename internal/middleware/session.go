@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -25,6 +26,7 @@ const bearerPrefix = "Bearer "
 
 // RequireSession 返回一个 gin 中间件，校验 Bearer JWT session token。
 // 通过后注入 accountId/deviceId/devicePubKey 到 gin.Context，并拒绝已吊销设备。
+// 认证成功后会推进设备的 last_seen_at（best-effort，失败不阻断请求）。
 // 失败响应统一 401（缺失/格式错/非法 token→无 code；已吊销→device_revoked）。
 func RequireSession(q *db.Queries, jwtSecret []byte) gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -68,6 +70,11 @@ func RequireSession(q *db.Queries, jwtSecret []byte) gin.HandlerFunc {
 		c.Set(CtxAccountID, dev.AccountID)
 		c.Set(CtxDeviceID, dev.DeviceID)
 		c.Set(CtxDeviceKey, dev.DevicePubKey)
+
+		// 更新设备最后活跃时间（best-effort：失败不阻断请求，仅静默忽略）。
+		// 供 GET /devices 的 lastSeenAt 字段。同步场景低 QPS，每请求一次 UPDATE 可接受。
+		_ = q.TouchDeviceLastSeen(c.Request.Context(), dev.DeviceID, time.Now().Unix())
+
 		c.Next()
 	}
 }
