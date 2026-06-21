@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"lumina-relay/internal/db"
 )
@@ -82,8 +83,9 @@ func TestDeviceService_RegisterDevice_AccountNotFound(t *testing.T) {
 		DevicePubKey:     "pub",
 		DeviceName:       "x",
 	})
-	if !errors.Is(err, ErrAccountNotFound) {
-		t.Fatalf("账户不存在应返回 ErrAccountNotFound，得到 %v", err)
+	// 账户不存在应与恢复码错误返回相同错误（防账户存在性枚举，I2）
+	if !errors.Is(err, ErrBadRecoveryCode) {
+		t.Fatalf("账户不存在应返回 ErrBadRecoveryCode（与恢复码错误不可区分），得到 %v", err)
 	}
 }
 
@@ -276,6 +278,62 @@ func TestRegisterDevice_SuccessResetsFailCount(t *testing.T) {
 		if errors.Is(err, ErrAccountLocked) {
 			t.Fatalf("第 %d 次失败不应触发锁定（计数已重置），得到 %v", i+1, err)
 		}
+	}
+}
+
+// TestRegisterDevice_LockExpiresThenSingleFailDoesNotRelock 验证锁过期后，
+// 单次失败不会立即重锁（I1 回归：过期时计数应已重置）。
+func TestRegisterDevice_LockExpiresThenSingleFailDoesNotRelock(t *testing.T) {
+	q, cleanup := openQueries(t)
+	defer cleanup()
+	ctx := context.Background()
+	accountID, wantHash := seedAccountForDevice(t, q)
+	wrongHash := append([]byte(nil), wantHash...)
+	wrongHash[0] ^= 0xff
+
+	svc := NewDeviceService(q)
+	// 失败 5 次触发锁定
+	for i := 0; i < recoveryFailThreshold; i++ {
+		svc.RegisterDevice(ctx, DeviceRegisterInput{
+			AccountID: accountID, RecoveryCodeHash: wrongHash,
+			DevicePubKey: "k", DeviceName: "d",
+		})
+	}
+	// 确认已锁
+	if _, err := svc.RegisterDevice(ctx, DeviceRegisterInput{
+		AccountID: accountID, RecoveryCodeHash: wantHash,
+		DevicePubKey: "k", DeviceName: "d",
+	}); !errors.Is(err, ErrAccountLocked) {
+		t.Fatalf("锁定后应返 ErrAccountLocked，得到 %v", err)
+	}
+
+	// 手动把 locked_until 置为过去（模拟锁过期）。
+	// 先 reset 清零（绕过 LockRecovery 的 max 保护），再直接设过期值。
+	if err := q.ResetRecoveryLock(ctx, accountID); err != nil {
+		t.Fatalf("reset 失败：%v", err)
+	}
+	if err := q.LockRecovery(ctx, accountID, time.Now().Unix()-1); err != nil {
+		t.Fatalf("置过期锁定失败：%v", err)
+	}
+	// 重新把 fail_count 设到阈值（reset 清零了，需补回以验证 service 重置逻辑）
+	for i := 0; i < recoveryFailThreshold; i++ {
+		q.IncRecoveryFail(ctx, accountID)
+	}
+
+	// 锁过期后，单次错误恢复码不应立即重锁（计数已重置）
+	_, err := svc.RegisterDevice(ctx, DeviceRegisterInput{
+		AccountID: accountID, RecoveryCodeHash: wrongHash,
+		DevicePubKey: "k", DeviceName: "d",
+	})
+	if !errors.Is(err, ErrBadRecoveryCode) {
+		t.Fatalf("过期后单次失败应返 ErrBadRecoveryCode（非锁定），得到 %v", err)
+	}
+	// 此时再尝试正确恢复码应成功（未被锁定）
+	if _, err := svc.RegisterDevice(ctx, DeviceRegisterInput{
+		AccountID: accountID, RecoveryCodeHash: wantHash,
+		DevicePubKey: "k-ok", DeviceName: "d",
+	}); err != nil {
+		t.Fatalf("过期后单次失败 + 正确恢复码应成功，得到 %v", err)
 	}
 }
 

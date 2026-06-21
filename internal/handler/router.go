@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -29,6 +30,15 @@ type Deps struct {
 // 限流器在路由层按 sync-design §6.6 配置。
 func NewRouter(deps Deps) *gin.Engine {
 	r := gin.New()
+
+	// 信任同机反代（如本机 nginx/caddy 终止 TLS 后回源）。
+	// 仅信任 127.0.0.1：ClientIP 解析 X-Forwarded-For，但外部请求到不了 127.0.0.1，
+	// 故攻击者无法伪造 XFF 绕过限流。若部署架构变化（如 K8s pod 网段），需同步调整。
+	// SetTrustedProxies 返回错误时（配置非法）直接 panic：这是启动期配置错误，不可恢复。
+	if err := r.SetTrustedProxies([]string{"127.0.0.1"}); err != nil {
+		panic(fmt.Errorf("配置可信代理失败：%w", err))
+	}
+
 	// 访问日志中间件放在最前：记录所有请求（含被限流/认证拒绝的），
 	// 按 status 分级（2xx/3xx Info、4xx Warn、5xx Error），GET /health 短路跳过。
 	r.Use(middleware.AccessLog())

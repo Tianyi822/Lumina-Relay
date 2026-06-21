@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -14,12 +15,12 @@ const (
 	maxJSONBody int64 = 1 << 16 // 64 KiB
 )
 
-// bodyLimitResponse 是超限时的统一错误响应。
-var bodyLimitExceeded = struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
-}{
-	Code: "request_too_large", Message: "请求体超过大小上限",
+// bodyLimitExceeded 是超限时的统一错误响应。
+var bodyLimitExceeded = gin.H{
+	"error": gin.H{
+		"code":    "request_too_large",
+		"message": "请求体超过大小上限",
+	},
 }
 
 // BodyLimitBlock 限制块上传（application/octet-stream）body 不超过 1 MiB。
@@ -38,16 +39,43 @@ func BodyLimitJSON() gin.HandlerFunc {
 	}
 }
 
-// limitBody 用 http.MaxBytesReader 包裹请求体；超限时 ReadAll/ShouldBindJSON
-// 会返回错误，但 MaxBytesReader 在超限时也会触发 immediate 413（net/http）。
-// 此处主动写 413 响应并 abort，避免下游 handler 再读取。
+// limitBody 用 http.MaxBytesReader 包裹请求体。
+//
+// 两道防线：
+//  1. 若请求声明了 Content-Length 且超限，立即 AbortWithStatusJSON(413)。
+//  2. 否则（chunked / 无 Content-Length）包裹后放行，由下游读取触发 MaxBytesReader
+//     超限。此时下游的 io.ReadAll 会返回 *http.MaxBytesError，调用
+//     HandleBodyReadError 统一处理（不再重复写响应）。
 func limitBody(c *gin.Context, max int64) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, max)
-	// 注意：不在此处主动校验 ContentLength（分块传输可能无该头）。
-	// 实际超限由下游读取触发；若请求已声明 Content-Length 超限，主动拒绝。
 	if c.Request.ContentLength > max {
-		c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": bodyLimitExceeded})
+		c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, bodyLimitExceeded)
 		return
 	}
 	c.Next()
+}
+
+// HandleBodyReadError 处理下游（signed 中间件 / handler）读取 body 时的错误。
+//
+// 关键：若是 MaxBytesReader 触发的超限（*http.MaxBytesError），MaxBytesReader
+// 已经向 ResponseWriter 写了 413 状态行与 body，此处不可再写第二次响应
+// （否则双写导致响应损坏）。仅 Abort 中断中间件链即可。
+//
+// 其他读取错误（如连接中断）按 fallbackStatus + fallbackCode 返回。
+//
+// 返回 true 表示已处理（调用方应直接 return）。
+func HandleBodyReadError(c *gin.Context, err error, fallbackStatus int, fallbackCode, fallbackMsg string) bool {
+	if err == nil {
+		return false
+	}
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		// MaxBytesReader 已写 413，仅中止链，不重复写
+		c.Abort()
+		return true
+	}
+	c.AbortWithStatusJSON(fallbackStatus, gin.H{"error": gin.H{
+		"code": fallbackCode, "message": fallbackMsg,
+	}})
+	return true
 }

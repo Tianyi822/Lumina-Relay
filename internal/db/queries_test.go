@@ -488,6 +488,15 @@ func TestQueries_LockAndResetRecovery(t *testing.T) {
 		t.Fatalf("locked_until = %d, want 9999", row.RecoveryLockedUntil)
 	}
 
+	// I3：较小的值不应覆盖较大的现有值
+	if err := q.LockRecovery(ctx, "acc-lr", 100); err != nil {
+		t.Fatalf("LockRecovery(较小值) 失败：%v", err)
+	}
+	row, _ = q.GetRecoveryLock(ctx, "acc-lr")
+	if row.RecoveryLockedUntil != 9999 {
+		t.Fatalf("较小值不应覆盖：locked_until = %d, want 仍为 9999", row.RecoveryLockedUntil)
+	}
+
 	// 重置
 	if err := q.ResetRecoveryLock(ctx, "acc-lr"); err != nil {
 		t.Fatalf("ResetRecoveryLock 失败：%v", err)

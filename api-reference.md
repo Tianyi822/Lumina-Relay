@@ -195,7 +195,7 @@ canonical = method + "\n" + path + "\n" + timestamp + "\n" + nonce + "\n" + hex(
 }
 ```
 
-**错误**: `401 bad_recovery_code`（恢复码错误）、`404`（账户不存在）、`429 rate_limited`（恢复码连续失败 5 次，账户锁定 15 分钟）
+**错误**: `401 bad_recovery_code`（恢复码错误或账户不存在，二者不可区分以防枚举）、`429 rate_limited`（恢复码连续失败 5 次，账户锁定 15 分钟）
 
 **限流**: 5 次/分钟/IP
 

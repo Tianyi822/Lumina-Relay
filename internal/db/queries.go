@@ -43,8 +43,9 @@ WHERE account_id = ?`
 
 	// sqlLockRecovery 锁定账户恢复码到指定时间戳（Unix 秒）。
 	// 达到失败阈值时调用（当前阈值 5，见 service.RegisterDevice）。
+	// 仅当新值 > 现有值时更新，避免并发请求用较早的 now 覆盖更长的锁（I3）。
 	sqlLockRecovery = `UPDATE accounts SET recovery_locked_until = ?
-WHERE account_id = ?`
+WHERE account_id = ? AND recovery_locked_until < ?`
 
 	// sqlResetRecoveryLock 重置失败计数与锁定（恢复码校验成功时调用）。
 	sqlResetRecoveryLock = `UPDATE accounts SET recovery_fail_count = 0, recovery_locked_until = 0
@@ -338,8 +339,9 @@ func (q *Queries) IncRecoveryFail(ctx context.Context, accountID string) error {
 }
 
 // LockRecovery 锁定账户恢复码到 lockedUntil（Unix 秒）。
+// 仅当 lockedUntil 大于现有值时才更新（避免并发请求用较早时间戳缩短锁，I3）。
 func (q *Queries) LockRecovery(ctx context.Context, accountID string, lockedUntil int64) error {
-	if _, err := q.db.ExecContext(ctx, sqlLockRecovery, lockedUntil, accountID); err != nil {
+	if _, err := q.db.ExecContext(ctx, sqlLockRecovery, lockedUntil, accountID, lockedUntil); err != nil {
 		return fmt.Errorf("锁定恢复码：%w", err)
 	}
 	return nil

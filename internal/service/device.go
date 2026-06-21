@@ -63,7 +63,8 @@ func (s *DeviceService) RegisterDevice(ctx context.Context, in DeviceRegisterInp
 	stored, err := s.q.GetAccountRecoveryHash(ctx, in.AccountID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return DeviceRegisterOutput{}, ErrAccountNotFound
+			// 账户不存在：返回与"恢复码错误"相同的错误，避免账户存在性枚举（I2）。
+			return DeviceRegisterOutput{}, ErrBadRecoveryCode
 		}
 		return DeviceRegisterOutput{}, fmt.Errorf("读取恢复码哈希：%w", err)
 	}
@@ -76,6 +77,13 @@ func (s *DeviceService) RegisterDevice(ctx context.Context, in DeviceRegisterInp
 	now := time.Now().Unix()
 	if lock.RecoveryLockedUntil > now {
 		return DeviceRegisterOutput{}, ErrAccountLocked
+	}
+	// 锁已过期：重置失败计数，避免"过期后一次失误立即重锁"。
+	// （ResetRecoveryLock 同时清零 count 与 locked_until）
+	if lock.RecoveryLockedUntil != 0 {
+		if err := s.q.ResetRecoveryLock(ctx, in.AccountID); err != nil {
+			return DeviceRegisterOutput{}, fmt.Errorf("重置过期锁定：%w", err)
+		}
 	}
 
 	if !bytes.Equal(stored, in.RecoveryCodeHash) {

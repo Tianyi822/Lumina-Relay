@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"lumina-relay/internal/apperr"
+	"lumina-relay/internal/middleware"
 	"lumina-relay/internal/service"
 )
 
@@ -64,10 +65,7 @@ func PutBlock(deps Deps) gin.HandlerFunc {
 		blockID := c.Param("blockId")
 
 		data, err := io.ReadAll(c.Request.Body)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-				"code": "bad_request", "message": "读取 body 失败",
-			}})
+		if middleware.HandleBodyReadError(c, err, http.StatusBadRequest, "bad_request", "读取 body 失败") {
 			return
 		}
 

@@ -3,6 +3,7 @@ package middleware
 import (
 	"bytes"
 	"io"
+	"net/http"
 	"strconv"
 	"time"
 
@@ -36,10 +37,12 @@ func RequireSignedWrite(nonceStore *auth.NonceStore) gin.HandlerFunc {
 			return
 		}
 
-		// 读 body（算 canonical 用），重建供后续 handler 重读
+		// 读 body（算 canonical 用），重建供后续 handler 重读。
+		// 注意：body 可能被 BodyLimit 中间件用 MaxBytesReader 包裹，
+		// 超限时 ReadAll 返回 *http.MaxBytesError，需经 HandleBodyReadError
+		// 统一处理（MaxBytesReader 已写 413，此处不可重复写）。
 		bodyBytes, err := io.ReadAll(c.Request.Body)
-		if err != nil {
-			writeUnauthorized(c, "read body failed")
+		if HandleBodyReadError(c, err, http.StatusUnauthorized, "unauthorized", "read body failed") {
 			return
 		}
 		_ = c.Request.Body.Close()
