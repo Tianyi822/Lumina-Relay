@@ -105,6 +105,20 @@ func (s *AccountService) GetDEK(ctx context.Context, accountID string) (DEKEnvel
 	return DEKEnvelope{Salt: row.DekSalt, Nonce: row.DekNonce, Ct: row.DekCt}, nil
 }
 
+// GetDEKByRecoveryHash 按恢复码哈希反查账户，返回 accountId 与 DEK 信封。
+// 供 GET /account/dek?recoveryCodeHash= 使用（换设备流程：新设备仅有恢复码）。
+// 账户不存在时返回 ErrAccountNotFound。
+func (s *AccountService) GetDEKByRecoveryHash(ctx context.Context, hash []byte) (string, DEKEnvelope, error) {
+	row, err := s.q.GetAccountByRecoveryHash(ctx, hash)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", DEKEnvelope{}, ErrAccountNotFound
+		}
+		return "", DEKEnvelope{}, fmt.Errorf("按恢复码反查 DEK：%w", err)
+	}
+	return row.AccountID, DEKEnvelope{Salt: row.DekSalt, Nonce: row.DekNonce, Ct: row.DekCt}, nil
+}
+
 // UpdateDEK 替换账户的 DEK 信封（改主密码场景，sync-design §277-280）。
 // dek 为新信封字段。改密码不碰任何已加密数据块。
 func (s *AccountService) UpdateDEK(ctx context.Context, accountID string, dek DEKEnvelope) error {

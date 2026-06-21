@@ -1,7 +1,9 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -114,5 +116,46 @@ func TestAccountService_Register_DeterministicFields(t *testing.T) {
 	}
 	if dev.RevokedAt.Valid {
 		t.Error("新设备 revoked_at 应为 NULL")
+	}
+}
+
+// TestAccountService_GetDEKByRecoveryHash 验证按恢复码哈希反查返回 accountId + DEK。
+func TestAccountService_GetDEKByRecoveryHash(t *testing.T) {
+	q, cleanup := openQueries(t)
+	defer cleanup()
+
+	svc := NewAccountService(q)
+	ctx := context.Background()
+	wantHash := []byte("recovery-svc")
+	out, err := svc.Register(ctx, RegisterInput{
+		RecoveryCodeHash: wantHash,
+		DekSalt:          []byte("s"), DekNonce: []byte("n"), DekCt: []byte("c"),
+		DevicePubKey: "pk", DeviceName: "d",
+	})
+	if err != nil {
+		t.Fatalf("Register 失败：%v", err)
+	}
+
+	id, dek, err := svc.GetDEKByRecoveryHash(ctx, wantHash)
+	if err != nil {
+		t.Fatalf("GetDEKByRecoveryHash 失败：%v", err)
+	}
+	if id != out.AccountID {
+		t.Errorf("accountId = %q, want %q", id, out.AccountID)
+	}
+	if !bytes.Equal(dek.Salt, []byte("s")) || !bytes.Equal(dek.Nonce, []byte("n")) || !bytes.Equal(dek.Ct, []byte("c")) {
+		t.Errorf("DEK 字段不匹配：%+v", dek)
+	}
+}
+
+// TestAccountService_GetDEKByRecoveryHash_NotFound 验证查无此户返 ErrAccountNotFound。
+func TestAccountService_GetDEKByRecoveryHash_NotFound(t *testing.T) {
+	q, cleanup := openQueries(t)
+	defer cleanup()
+
+	svc := NewAccountService(q)
+	_, _, err := svc.GetDEKByRecoveryHash(context.Background(), []byte("missing"))
+	if !errors.Is(err, ErrAccountNotFound) {
+		t.Fatalf("期望 ErrAccountNotFound，得到 %v", err)
 	}
 }

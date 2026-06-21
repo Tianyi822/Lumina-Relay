@@ -165,3 +165,47 @@ func TestRevokeDevice_CrossAccount_Rejected(t *testing.T) {
 	}
 }
 
+// TestDeviceService_ListDevices 验证列出账户下未吊销设备，已吊销设备被排除。
+func TestDeviceService_ListDevices(t *testing.T) {
+	q, cleanup := openQueries(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	accountID, wantHash := seedAccountForDevice(t, q)
+
+	svc := NewDeviceService(q)
+	// 注册两台设备（RegisterDevice 内部会校验恢复码）
+	d1, err := svc.RegisterDevice(ctx, DeviceRegisterInput{
+		AccountID: accountID, RecoveryCodeHash: wantHash,
+		DevicePubKey: "k1", DeviceName: "one",
+	})
+	if err != nil {
+		t.Fatalf("建设备 d1 失败：%v", err)
+	}
+	d2, err := svc.RegisterDevice(ctx, DeviceRegisterInput{
+		AccountID: accountID, RecoveryCodeHash: wantHash,
+		DevicePubKey: "k2", DeviceName: "two",
+	})
+	if err != nil {
+		t.Fatalf("建设备 d2 失败：%v", err)
+	}
+	// 吊销 d2
+	if err := svc.RevokeDevice(ctx, accountID, d2.DeviceID); err != nil {
+		t.Fatalf("吊销 d2 失败：%v", err)
+	}
+
+	devs, err := svc.ListDevices(ctx, accountID)
+	if err != nil {
+		t.Fatalf("ListDevices 失败：%v", err)
+	}
+	if len(devs) != 1 {
+		t.Fatalf("设备数 = %d, want 1（排除已吊销）", len(devs))
+	}
+	if devs[0].DeviceID != d1.DeviceID || devs[0].DeviceName != "one" {
+		t.Errorf("字段不匹配：%+v", devs[0])
+	}
+	if devs[0].LastSeenAt == 0 {
+		t.Errorf("d1 last_seen_at 不应为 0")
+	}
+}
+

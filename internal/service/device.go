@@ -102,3 +102,31 @@ func (s *DeviceService) RevokeDevice(ctx context.Context, callerAccountID, devic
 	}
 	return nil
 }
+
+// DeviceInfo 是设备列表项（不含已吊销设备），GET /devices 返回。
+type DeviceInfo struct {
+	DeviceID     string
+	DeviceName   string
+	DevicePubKey string
+	CreatedAt    int64
+	LastSeenAt   int64
+}
+
+// ListDevices 列出账户下所有未吊销设备，按创建时间升序。
+func (s *DeviceService) ListDevices(ctx context.Context, accountID string) ([]DeviceInfo, error) {
+	rows, err := s.q.ListDevicesByAccount(ctx, accountID)
+	if err != nil {
+		return nil, fmt.Errorf("列出设备：%w", err)
+	}
+	out := make([]DeviceInfo, len(rows))
+	for i, r := range rows {
+		out[i] = DeviceInfo{
+			DeviceID:     r.DeviceID,
+			DeviceName:   r.DeviceName,
+			DevicePubKey: r.DevicePubKey,
+			CreatedAt:    r.CreatedAt,
+			LastSeenAt:   r.LastSeenAt,
+		}
+	}
+	return out, nil
+}
