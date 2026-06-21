@@ -63,6 +63,8 @@ canonical = method + "\n" + path + "\n" + timestamp + "\n" + nonce + "\n" + hex(
 
 用设备的 Ed25519 **私钥**对 canonical 串签名，hex 编码后放入 `X-Signature`。
 
+> ⚠️ **哈希算法必须统一用 SHA-256，禁止 BLAKE2b。** 写操作签名 `bodyHash`、块上传 `blockId` 计算、`blocks/have` 查重 id 三处均使用 `crypto/sha256`。客户端若用 libsodium `crypto_generichash`（BLAKE2b）会导致验签失败与块上传 `block_hash_mismatch`。
+
 > ⚠️ `path` 必须是**实际请求路径**（含 blockId 等 path 参数），不含 query string。服务端用 `request.URL.Path` 校验。
 
 ---
@@ -73,7 +75,7 @@ canonical = method + "\n" + path + "\n" + timestamp + "\n" + nonce + "\n" + hex(
 |---|---|---|---|---|
 | 1 | GET | `/health` | 无 | 健康检查 |
 | 2 | POST | `/account/register` | 无 | 注册账户 + 首台设备 |
-| 3 | GET | `/account/dek` | 限流 10/min | 读取账户 DEK 信封 |
+| 3 | GET | `/account/dek` | 限流 10/min | 读取账户 DEK 信封（支持 accountId 或 recoveryCodeHash 查询） |
 | 4 | POST | `/device/register` | 限流 5/min | 添加新设备（需恢复码） |
 | 5 | PUT | `/account/dek` | Session + 签名 | 更新 DEK 信封 |
 | 6 | DELETE | `/device/:deviceId` | Session + 签名 | 吊销设备 |
@@ -82,6 +84,7 @@ canonical = method + "\n" + path + "\n" + timestamp + "\n" + nonce + "\n" + hex(
 | 9 | POST | `/blocks/have` | Session | 批量查重 |
 | 10 | PUT | `/blocks/:blockId` | Session + 签名 | 上传密文块 |
 | 11 | GET | `/blocks/:blockId` | Session | 下载密文块 |
+| 12 | GET | `/devices` | Session | 列出账户下设备 |
 
 ---
 
@@ -131,11 +134,17 @@ canonical = method + "\n" + path + "\n" + timestamp + "\n" + nonce + "\n" + hex(
 
 ### 3. GET /account/dek
 
-读取账户的 DEK 信封。用于新设备恢复密钥。
+读取账户的 DEK 信封。用于新设备恢复密钥。支持两种**互斥**查询参数之一：
 
-**查询参数**: `accountId` (string) — 必填
+**查询参数**（二选一，必填其一）:
+| 参数 | 类型 | 用途 |
+|---|---|---|
+| `accountId` | string | 已知 accountId 时直接取 DEK |
+| `recoveryCodeHash` | string(hex) | 换设备流程：新设备仅有恢复码，反查 accountId + DEK |
 
-**响应** `200`:
+> 同时传两个 / 都不传 → 400。
+
+**响应（accountId 查询）** `200`:
 ```json
 {
   "dekEnvelope": {
@@ -146,7 +155,21 @@ canonical = method + "\n" + path + "\n" + timestamp + "\n" + nonce + "\n" + hex(
 }
 ```
 
-**错误**: `400`（缺 accountId）、`404`（账户不存在）
+**响应（recoveryCodeHash 查询）** `200`:
+```json
+{
+  "accountId": "uuid",
+  "dekEnvelope": {
+    "salt": "hex",
+    "nonce": "hex",
+    "ct": "hex"
+  }
+}
+```
+
+> `recoveryCodeHash` 分支多返回 `accountId`：换设备流程下一步 `POST /device/register` 需要它。
+
+**错误**: `400`（参数缺失/互斥冲突/hex 非法）、`404`（账户不存在）
 
 **限流**: 10 次/分钟/IP
 
@@ -313,6 +336,31 @@ canonical = method + "\n" + path + "\n" + timestamp + "\n" + nonce + "\n" + hex(
 
 ---
 
+### 12. GET /devices
+
+列出当前账户下所有**未吊销**设备。
+
+**前置**: Session
+
+**响应** `200`（数组）:
+```json
+[
+  {
+    "deviceId": "uuid",
+    "deviceName": "string",
+    "devicePubKey": "hex(32字节)",
+    "createdAt": 1700000000,
+    "lastSeenAt": 1700000000
+  }
+]
+```
+
+> `createdAt` / `lastSeenAt` 为 Unix 秒。`lastSeenAt` 在每次 Session 认证成功时更新。已吊销设备不在列表中。
+
+**错误**: `401`（认证失败）
+
+---
+
 ## 错误码
 
 所有错误响应统一格式：
@@ -364,7 +412,7 @@ canonical = method + "\n" + path + "\n" + timestamp + "\n" + nonce + "\n" + hex(
 ```
 1. 新设备生成 Ed25519 密钥对
 2. 输入原始 recoveryCode
-3. GET /account/dek?accountId=...   → 拿到 DEK 信封
+3. GET /account/dek?recoveryCodeHash=<hex(recoveryCode)>  → 拿到 accountId + DEK 信封
 4. 用 recoveryCode 解锁 DEK
 5. POST /device/register            → 拿到新 deviceId, sessionToken
 6. GET /manifest                    → 拿到当前清单，开始同步
@@ -410,6 +458,13 @@ curl -X POST http://localhost:8443/account/register \
 
 # 读取 DEK（限流端点）
 curl "http://localhost:8443/account/dek?accountId=<accountId>"
+
+# 换设备：用恢复码反查 accountId + DEK
+curl "http://localhost:8443/account/dek?recoveryCodeHash=<hex>"
+
+# 列出账户下设备（需 session）
+curl http://localhost:8443/devices \
+  -H "Authorization: Bearer <sessionToken>"
 
 # 读取 manifest（需 session）
 curl http://localhost:8443/manifest \
