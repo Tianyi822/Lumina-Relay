@@ -438,3 +438,62 @@ func TestQueries_BlockMeta(t *testing.T) {
 		t.Fatalf("空账户 total = %d, want 0", total)
 	}
 }
+
+// TestQueries_RecoveryLock_Defaults 验证新账户的恢复码锁定状态为默认值（0, 0）。
+func TestQueries_RecoveryLock_Defaults(t *testing.T) {
+	q, cleanup := openTestQueries(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedAccount(t, q, "acc-lock")
+
+	row, err := q.GetRecoveryLock(ctx, "acc-lock")
+	if err != nil {
+		t.Fatalf("GetRecoveryLock 失败：%v", err)
+	}
+	if row.RecoveryFailCount != 0 || row.RecoveryLockedUntil != 0 {
+		t.Fatalf("新账户锁定状态应为 (0,0)，得到 (%d,%d)", row.RecoveryFailCount, row.RecoveryLockedUntil)
+	}
+}
+
+// TestQueries_IncRecoveryFail 验证失败计数累加生效。
+func TestQueries_IncRecoveryFail(t *testing.T) {
+	q, cleanup := openTestQueries(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedAccount(t, q, "acc-inc")
+	for i := 0; i < 3; i++ {
+		if err := q.IncRecoveryFail(ctx, "acc-inc"); err != nil {
+			t.Fatalf("IncRecoveryFail #%d 失败：%v", i, err)
+		}
+	}
+	row, _ := q.GetRecoveryLock(ctx, "acc-inc")
+	if row.RecoveryFailCount != 3 {
+		t.Fatalf("失败计数 = %d, want 3", row.RecoveryFailCount)
+	}
+}
+
+// TestQueries_LockAndResetRecovery 验证锁定写入与重置清零。
+func TestQueries_LockAndResetRecovery(t *testing.T) {
+	q, cleanup := openTestQueries(t)
+	defer cleanup()
+	ctx := context.Background()
+	seedAccount(t, q, "acc-lr")
+
+	// 锁定到 t=9999
+	if err := q.LockRecovery(ctx, "acc-lr", 9999); err != nil {
+		t.Fatalf("LockRecovery 失败：%v", err)
+	}
+	row, _ := q.GetRecoveryLock(ctx, "acc-lr")
+	if row.RecoveryLockedUntil != 9999 {
+		t.Fatalf("locked_until = %d, want 9999", row.RecoveryLockedUntil)
+	}
+
+	// 重置
+	if err := q.ResetRecoveryLock(ctx, "acc-lr"); err != nil {
+		t.Fatalf("ResetRecoveryLock 失败：%v", err)
+	}
+	row, _ = q.GetRecoveryLock(ctx, "acc-lr")
+	if row.RecoveryFailCount != 0 || row.RecoveryLockedUntil != 0 {
+		t.Fatalf("重置后应为 (0,0)，得到 (%d,%d)", row.RecoveryFailCount, row.RecoveryLockedUntil)
+	}
+}

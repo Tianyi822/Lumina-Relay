@@ -209,3 +209,73 @@ func TestDeviceService_ListDevices(t *testing.T) {
 	}
 }
 
+// TestRegisterDevice_FailsThenLocks 验证连续失败 recoveryFailThreshold 次（5 次）后
+// 账户被锁定，第 6 次（即使恢复码正确）也返回 ErrAccountLocked。
+func TestRegisterDevice_FailsThenLocks(t *testing.T) {
+	q, cleanup := openQueries(t)
+	defer cleanup()
+	ctx := context.Background()
+	accountID, wantHash := seedAccountForDevice(t, q)
+	wrongHash := append([]byte(nil), wantHash...)
+	wrongHash[0] ^= 0xff // 翻转首字节，确保不同
+
+	svc := NewDeviceService(q)
+	// 前 5 次失败：第 5 次触发锁定
+	for i := 0; i < recoveryFailThreshold; i++ {
+		_, err := svc.RegisterDevice(ctx, DeviceRegisterInput{
+			AccountID: accountID, RecoveryCodeHash: wrongHash,
+			DevicePubKey: "k", DeviceName: "d",
+		})
+		if !errors.Is(err, ErrBadRecoveryCode) {
+			t.Fatalf("第 %d 次失败应返回 ErrBadRecoveryCode，得到 %v", i+1, err)
+		}
+	}
+	// 第 6 次：即使恢复码正确，也因锁定被拒
+	_, err := svc.RegisterDevice(ctx, DeviceRegisterInput{
+		AccountID: accountID, RecoveryCodeHash: wantHash,
+		DevicePubKey: "k", DeviceName: "d",
+	})
+	if !errors.Is(err, ErrAccountLocked) {
+		t.Fatalf("锁定后应返回 ErrAccountLocked，得到 %v", err)
+	}
+}
+
+// TestRegisterDevice_SuccessResetsFailCount 验证恢复码正确时计数重置，
+// 不会因零星失败累积到锁定。
+func TestRegisterDevice_SuccessResetsFailCount(t *testing.T) {
+	q, cleanup := openQueries(t)
+	defer cleanup()
+	ctx := context.Background()
+	accountID, wantHash := seedAccountForDevice(t, q)
+	wrongHash := append([]byte(nil), wantHash...)
+	wrongHash[0] ^= 0xff
+
+	svc := NewDeviceService(q)
+	// 失败 2 次（未达阈值）
+	for i := 0; i < 2; i++ {
+		svc.RegisterDevice(ctx, DeviceRegisterInput{
+			AccountID: accountID, RecoveryCodeHash: wrongHash,
+			DevicePubKey: "k", DeviceName: "d",
+		})
+	}
+	// 成功一次，计数应清零
+	if _, err := svc.RegisterDevice(ctx, DeviceRegisterInput{
+		AccountID: accountID, RecoveryCodeHash: wantHash,
+		DevicePubKey: "k-correct", DeviceName: "d",
+	}); err != nil {
+		t.Fatalf("正确恢复码应成功，得到 %v", err)
+	}
+	// 再失败 4 次（若计数未重置，累计 2+4=6 会锁；重置后 4<5 不锁）
+	wrongHash2 := append([]byte(nil), wantHash...)
+	wrongHash2[1] ^= 0xff
+	for i := 0; i < 4; i++ {
+		_, err := svc.RegisterDevice(ctx, DeviceRegisterInput{
+			AccountID: accountID, RecoveryCodeHash: wrongHash2,
+			DevicePubKey: "k", DeviceName: "d",
+		})
+		if errors.Is(err, ErrAccountLocked) {
+			t.Fatalf("第 %d 次失败不应触发锁定（计数已重置），得到 %v", i+1, err)
+		}
+	}
+}
+

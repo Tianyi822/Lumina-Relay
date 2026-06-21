@@ -31,6 +31,25 @@ WHERE account_id = ?`
 FROM accounts
 WHERE recovery_code_hash = ?`
 
+	// sqlGetRecoveryLock 读取账户的恢复码锁定状态（失败计数 + 锁定到期时间）。
+	// 供 /device/register 在校验恢复码前判断是否被锁定（C3 防爆破）。
+	sqlGetRecoveryLock = `SELECT recovery_fail_count, recovery_locked_until
+FROM accounts
+WHERE account_id = ?`
+
+	// sqlIncRecoveryFail 恢复码失败计数 +1。供 /device/register 恢复码不匹配时调用。
+	sqlIncRecoveryFail = `UPDATE accounts SET recovery_fail_count = recovery_fail_count + 1
+WHERE account_id = ?`
+
+	// sqlLockRecovery 锁定账户恢复码到指定时间戳（Unix 秒）。
+	// 达到失败阈值时调用（当前阈值 5，见 service.RegisterDevice）。
+	sqlLockRecovery = `UPDATE accounts SET recovery_locked_until = ?
+WHERE account_id = ?`
+
+	// sqlResetRecoveryLock 重置失败计数与锁定（恢复码校验成功时调用）。
+	sqlResetRecoveryLock = `UPDATE accounts SET recovery_fail_count = 0, recovery_locked_until = 0
+WHERE account_id = ?`
+
 	// sqlUpdateAccountDEK 替换账户的 DEK 信封（改主密码场景，sync-design §280）。
 	sqlUpdateAccountDEK = `UPDATE accounts
 SET dek_salt = ?, dek_nonce = ?, dek_ct = ?
@@ -291,6 +310,47 @@ func (q *Queries) GetAccountByRecoveryHash(ctx context.Context, hash []byte) (Ac
 		return AccountByRecoveryRow{}, fmt.Errorf("按恢复码反查账户：%w", err)
 	}
 	return row, nil
+}
+
+// RecoveryLockRow 是 GetRecoveryLock 的返回行，表达账户的恢复码锁定状态。
+type RecoveryLockRow struct {
+	RecoveryFailCount  int64
+	RecoveryLockedUntil int64 // Unix 秒，0 表示未锁
+}
+
+// GetRecoveryLock 读取账户的恢复码锁定状态。账户不存在时返回 sql.ErrNoRows。
+func (q *Queries) GetRecoveryLock(ctx context.Context, accountID string) (RecoveryLockRow, error) {
+	var row RecoveryLockRow
+	if err := q.db.QueryRowxContext(ctx, sqlGetRecoveryLock, accountID).Scan(
+		&row.RecoveryFailCount, &row.RecoveryLockedUntil,
+	); err != nil {
+		return RecoveryLockRow{}, fmt.Errorf("读取恢复码锁定状态：%w", err)
+	}
+	return row, nil
+}
+
+// IncRecoveryFail 恢复码失败计数 +1。
+func (q *Queries) IncRecoveryFail(ctx context.Context, accountID string) error {
+	if _, err := q.db.ExecContext(ctx, sqlIncRecoveryFail, accountID); err != nil {
+		return fmt.Errorf("累加恢复码失败计数：%w", err)
+	}
+	return nil
+}
+
+// LockRecovery 锁定账户恢复码到 lockedUntil（Unix 秒）。
+func (q *Queries) LockRecovery(ctx context.Context, accountID string, lockedUntil int64) error {
+	if _, err := q.db.ExecContext(ctx, sqlLockRecovery, lockedUntil, accountID); err != nil {
+		return fmt.Errorf("锁定恢复码：%w", err)
+	}
+	return nil
+}
+
+// ResetRecoveryLock 重置失败计数与锁定时间（恢复码校验成功后调用）。
+func (q *Queries) ResetRecoveryLock(ctx context.Context, accountID string) error {
+	if _, err := q.db.ExecContext(ctx, sqlResetRecoveryLock, accountID); err != nil {
+		return fmt.Errorf("重置恢复码锁定：%w", err)
+	}
+	return nil
 }
 
 // InsertManifestHead 初始化账户的 manifest_head，current_version 固定为 0。

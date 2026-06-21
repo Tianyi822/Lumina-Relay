@@ -16,6 +16,17 @@ import (
 // ErrBadRecoveryCode 表示恢复码哈希不匹配。handler 据此映射 401 bad_recovery_code。
 var ErrBadRecoveryCode = errors.New("bad recovery code")
 
+// ErrAccountLocked 表示账户恢复码已被锁定（连续失败超阈值）。handler 据此映射 429。
+var ErrAccountLocked = errors.New("account recovery locked")
+
+// 恢复码爆破防护阈值（C3）。
+const (
+	// recoveryFailThreshold 触发锁定的连续失败次数。
+	recoveryFailThreshold = 5
+	// recoveryLockDuration 锁定时长。
+	recoveryLockDuration = 15 * time.Minute
+)
+
 // DeviceRegisterInput 是设备注册的入参。
 // RecoveryCodeHash 由客户端算好上传（与注册时同一算法），服务端做字节比对。
 type DeviceRegisterInput struct {
@@ -41,8 +52,13 @@ func NewDeviceService(q *db.Queries) *DeviceService {
 }
 
 // RegisterDevice 校验恢复码哈希后为新设备写入 devices 表。
-// 恢复码不匹配返回 ErrBadRecoveryCode；账户不存在返回 ErrAccountNotFound。
+// 恢复码不匹配返回 ErrBadRecoveryCode；账户不存在返回 ErrAccountNotFound；
+// 账户被锁定（连续失败超阈值）返回 ErrAccountLocked。
 // 成功返回新 deviceId（uuid）。
+//
+// 爆破防护（C3）：恢复码校验失败累加计数，达到 recoveryFailThreshold 后
+// 锁定 recoveryLockDuration，期间即使恢复码正确也拒绝（返回 ErrAccountLocked）。
+// 成功后计数清零。
 func (s *DeviceService) RegisterDevice(ctx context.Context, in DeviceRegisterInput) (DeviceRegisterOutput, error) {
 	stored, err := s.q.GetAccountRecoveryHash(ctx, in.AccountID)
 	if err != nil {
@@ -51,8 +67,38 @@ func (s *DeviceService) RegisterDevice(ctx context.Context, in DeviceRegisterInp
 		}
 		return DeviceRegisterOutput{}, fmt.Errorf("读取恢复码哈希：%w", err)
 	}
+
+	// 锁定检查：若仍在锁定期内，直接拒绝（不泄露"恢复码是否正确"）
+	lock, err := s.q.GetRecoveryLock(ctx, in.AccountID)
+	if err != nil {
+		return DeviceRegisterOutput{}, fmt.Errorf("读取恢复码锁定状态：%w", err)
+	}
+	now := time.Now().Unix()
+	if lock.RecoveryLockedUntil > now {
+		return DeviceRegisterOutput{}, ErrAccountLocked
+	}
+
 	if !bytes.Equal(stored, in.RecoveryCodeHash) {
+		// 失败：累加计数，达阈值则锁定
+		if err := s.q.IncRecoveryFail(ctx, in.AccountID); err != nil {
+			return DeviceRegisterOutput{}, fmt.Errorf("累加失败计数：%w", err)
+		}
+		// 读回最新计数判断是否触发锁定（避免并发竞争的 off-by-one）
+		lockAfter, err := s.q.GetRecoveryLock(ctx, in.AccountID)
+		if err != nil {
+			return DeviceRegisterOutput{}, fmt.Errorf("读取失败计数：%w", err)
+		}
+		if lockAfter.RecoveryFailCount >= recoveryFailThreshold {
+			if err := s.q.LockRecovery(ctx, in.AccountID, now+int64(recoveryLockDuration.Seconds())); err != nil {
+				return DeviceRegisterOutput{}, fmt.Errorf("锁定恢复码：%w", err)
+			}
+		}
 		return DeviceRegisterOutput{}, ErrBadRecoveryCode
+	}
+
+	// 成功：重置计数与锁定
+	if err := s.q.ResetRecoveryLock(ctx, in.AccountID); err != nil {
+		return DeviceRegisterOutput{}, fmt.Errorf("重置恢复码锁定：%w", err)
 	}
 
 	deviceID := uuid.NewString()

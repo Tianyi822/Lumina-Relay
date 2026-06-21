@@ -49,6 +49,14 @@ func RegisterDevice(deps Deps) gin.HandlerFunc {
 			}})
 			return
 		}
+		// 强制 32 字节（SHA-256），防短哈希爆破
+		if len(recoveryHash) != 32 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+				"code":    "bad_request",
+				"message": "recoveryCodeHash 长度必须为 32 字节",
+			}})
+			return
+		}
 
 		out, err := deps.DeviceService.RegisterDevice(c.Request.Context(), service.DeviceRegisterInput{
 			AccountID:        req.AccountID,
@@ -60,6 +68,8 @@ func RegisterDevice(deps Deps) gin.HandlerFunc {
 			switch {
 			case errors.Is(err, service.ErrBadRecoveryCode):
 				apperr.New(apperr.CodeBadRecoveryCode, "恢复码错误").WriteJSON(c.Writer)
+			case errors.Is(err, service.ErrAccountLocked):
+				apperr.New(apperr.CodeRateLimited, "恢复码尝试过多，请稍后再试").WriteJSON(c.Writer)
 			case errors.Is(err, service.ErrAccountNotFound):
 				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{
 					"code":    "account_not_found",
