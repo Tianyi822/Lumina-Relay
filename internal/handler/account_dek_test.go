@@ -81,3 +81,78 @@ func TestGetAccountDEK_MissingParam(t *testing.T) {
 		t.Fatalf("status = %d, want 400", rec.Code)
 	}
 }
+
+// TestGetAccountDEK_ByRecoveryHash 验证 GET /account/dek?recoveryCodeHash= 返回
+// accountId + dekEnvelope（换设备流程用）。
+func TestGetAccountDEK_ByRecoveryHash(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.cleanup()
+
+	wantSalt := "73616c74"
+	wantNonce := "6e6f6e"
+	wantCt := "6374"
+	hashHex := "686172686172" // 任意合法 hex（"harhar"），作为 recoveryCodeHash
+	accountID := env.registerAccount(t, registerBody{
+		RecoveryCodeHash: hashHex,
+		DekSalt:          wantSalt,
+		DekNonce:         wantNonce,
+		DekCt:            wantCt,
+		DevicePubKey:     "aabb",
+		DeviceName:       "dev",
+	})
+
+	rec := env.doGET("/account/dek?recoveryCodeHash=" + hashHex)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200, body=%s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		AccountID string `json:"accountId"`
+		DekEnvelope struct {
+			Salt  string `json:"salt"`
+			Nonce string `json:"nonce"`
+			Ct    string `json:"ct"`
+		} `json:"dekEnvelope"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("解析响应失败：%v", err)
+	}
+	if resp.AccountID != accountID {
+		t.Errorf("accountId = %q, want %q", resp.AccountID, accountID)
+	}
+	if resp.DekEnvelope.Salt != wantSalt || resp.DekEnvelope.Nonce != wantNonce || resp.DekEnvelope.Ct != wantCt {
+		t.Errorf("dek 字段不匹配：salt=%q nonce=%q ct=%q", resp.DekEnvelope.Salt, resp.DekEnvelope.Nonce, resp.DekEnvelope.Ct)
+	}
+}
+
+// TestGetAccountDEK_RecoveryHashNotFound 验证恢复码查无此户返 404。
+func TestGetAccountDEK_RecoveryHashNotFound(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.cleanup()
+
+	rec := env.doGET("/account/dek?recoveryCodeHash=deadbeef")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+}
+
+// TestGetAccountDEK_BothParams 验证同时传 accountId 与 recoveryCodeHash 返 400。
+func TestGetAccountDEK_BothParams(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.cleanup()
+
+	rec := env.doGET("/account/dek?accountId=x&recoveryCodeHash=y")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400（两参数互斥）", rec.Code)
+	}
+}
+
+// TestGetAccountDEK_BadRecoveryHashHex 验证非法 hex 返 400。
+func TestGetAccountDEK_BadRecoveryHashHex(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.cleanup()
+
+	rec := env.doGET("/account/dek?recoveryCodeHash=zzz")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400（非法 hex）", rec.Code)
+	}
+}

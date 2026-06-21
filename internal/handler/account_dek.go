@@ -18,19 +18,62 @@ type dekEnvelopeResponse struct {
 }
 
 // GetAccountDEK 返回 GET /account/dek 的 gin handler。
-// 限流由路由层挂载（IPLimiter 10/min），handler 只负责业务。
-// 响应：200 { "dekEnvelope": { salt, nonce, ct } }。
+// 支持两种互斥查询参数：
+//   - ?accountId=<uuid>      → 返回 { dekEnvelope }（已知 accountId 取 DEK）
+//   - ?recoveryCodeHash=<hex>→ 返回 { accountId, dekEnvelope }（换设备流程：反查 accountId + DEK）
+//
+// 两者都有或都无 → 400。限流由路由层挂载（IPLimiter 10/min）。
 func GetAccountDEK(deps Deps) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		accountID := c.Query("accountId")
-		if accountID == "" {
+		recoveryHashHex := c.Query("recoveryCodeHash")
+
+		// 参数互斥校验：两者都有或都无 → 400
+		if (accountID == "") == (recoveryHashHex == "") {
 			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
 				"code":    "bad_request",
-				"message": "缺少 accountId 参数",
+				"message": "必须提供 accountId 或 recoveryCodeHash 之一",
 			}})
 			return
 		}
 
+		// 恢复码反查分支：换设备流程，返回 accountId + dekEnvelope
+		if recoveryHashHex != "" {
+			hash, err := hex.DecodeString(recoveryHashHex)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+					"code":    "bad_request",
+					"message": "recoveryCodeHash 不是合法 hex",
+				}})
+				return
+			}
+			accID, dek, err := deps.AccountService.GetDEKByRecoveryHash(c.Request.Context(), hash)
+			if err != nil {
+				if errors.Is(err, service.ErrAccountNotFound) {
+					c.JSON(http.StatusNotFound, gin.H{"error": gin.H{
+						"code":    "account_not_found",
+						"message": "账户不存在",
+					}})
+					return
+				}
+				c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
+					"code":    "internal_error",
+					"message": "读取 DEK 失败",
+				}})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{
+				"accountId": accID,
+				"dekEnvelope": dekEnvelopeResponse{
+					Salt:  hex.EncodeToString(dek.Salt),
+					Nonce: hex.EncodeToString(dek.Nonce),
+					Ct:    hex.EncodeToString(dek.Ct),
+				},
+			})
+			return
+		}
+
+		// accountId 分支（现状）：仅返回 dekEnvelope
 		dek, err := deps.AccountService.GetDEK(c.Request.Context(), accountID)
 		if err != nil {
 			if errors.Is(err, service.ErrAccountNotFound) {
@@ -46,7 +89,6 @@ func GetAccountDEK(deps Deps) gin.HandlerFunc {
 			}})
 			return
 		}
-
 		c.JSON(http.StatusOK, gin.H{"dekEnvelope": dekEnvelopeResponse{
 			Salt:  hex.EncodeToString(dek.Salt),
 			Nonce: hex.EncodeToString(dek.Nonce),
