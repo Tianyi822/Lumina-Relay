@@ -51,3 +51,44 @@ func TestMigrateUp_CreatesAllTables(t *testing.T) {
 		}
 	}
 }
+
+// TestMigrateUp_AddsLastSeenAt 验证迁移 000002 给 devices 表加 last_seen_at 列。
+func TestMigrateUp_AddsLastSeenAt(t *testing.T) {
+	dsn := testDSN(t)
+	if err := MigrateUp(dsn); err != nil {
+		t.Fatalf("MigrateUp 失败：%v", err)
+	}
+
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatalf("打开数据库失败：%v", err)
+	}
+	defer db.Close()
+
+	rows, err := db.Query("PRAGMA table_info(devices)")
+	if err != nil {
+		t.Fatalf("PRAGMA table_info 失败：%v", err)
+	}
+	defer rows.Close()
+	cols := make(map[string]string)
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("Scan 失败：%v", err)
+		}
+		cols[name] = ctype
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("遍历 rows 失败：%v", err)
+	}
+	ctype, ok := cols["last_seen_at"]
+	if !ok {
+		t.Fatalf("迁移后 devices 表缺少 last_seen_at 列，实际列：%v", cols)
+	}
+	if ctype != "INTEGER" {
+		t.Fatalf("last_seen_at 列类型 = %q, want INTEGER", ctype)
+	}
+}
