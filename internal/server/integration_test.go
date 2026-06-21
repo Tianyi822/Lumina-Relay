@@ -82,7 +82,7 @@ func TestIntegration_RegisterUploadManifestFlow(t *testing.T) {
 		t.Fatalf("生成密钥对失败：%v", err)
 	}
 	regBody := map[string]string{
-		"recoveryCodeHash": "686173686564",
+		"recoveryCodeHash": handler.TestRecoveryHashHex,
 		"dekSalt":          "73616c74",
 		"dekNonce":         "6e6f6e6365",
 		"dekCt":            "6374",
@@ -178,7 +178,7 @@ func TestIntegration_SecondManifestVersion(t *testing.T) {
 func registerAndGetToken(t *testing.T, env *integEnv, pub ed25519.PublicKey) string {
 	t.Helper()
 	body := map[string]string{
-		"recoveryCodeHash": "686173686564",
+		"recoveryCodeHash": handler.TestRecoveryHashHex,
 		"dekSalt":          "73616c74",
 		"dekNonce":         "6e6f6e6365",
 		"dekCt":            "6374",

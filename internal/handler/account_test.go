@@ -17,10 +17,10 @@ import (
 func TestRegisterAccount_CreatesAccountAndDevice(t *testing.T) {
 	env := newTestEnv(t) // 构造真实 DB + AccountService + JWT
 	body := map[string]string{
-		"recoveryCodeHash": "686173686564", // "hashed" 的 hex
-		"dekSalt":          "73616c74",     // "salt"
-		"dekNonce":         "6e6f6e6365",   // "nonce"
-		"dekCt":            "6374",         // "ct"
+		"recoveryCodeHash": testRecoveryHashHex, // 32 字节 SHA-256
+		"dekSalt":          "73616c74",          // "salt"
+		"dekNonce":         "6e6f6e6365",        // "nonce"
+		"dekCt":            "6374",              // "ct"
 		"devicePubKey":     "a1b2c3",
 		"deviceName":       "iphone",
 	}

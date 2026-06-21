@@ -47,6 +47,14 @@ func GetAccountDEK(deps Deps) gin.HandlerFunc {
 				}})
 				return
 			}
+			// 强制 32 字节（SHA-256），防短哈希爆破
+			if len(hash) != 32 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+					"code":    "bad_request",
+					"message": "recoveryCodeHash 长度必须为 32 字节",
+				}})
+				return
+			}
 			accID, dek, err := deps.AccountService.GetDEKByRecoveryHash(c.Request.Context(), hash)
 			if err != nil {
 				if errors.Is(err, service.ErrAccountNotFound) {

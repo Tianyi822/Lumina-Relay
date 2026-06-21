@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/hex"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 
@@ -82,17 +83,20 @@ func RegisterAccount(deps Deps) gin.HandlerFunc {
 }
 
 // decodeRegisterHexFields 把请求体的 hex 字段解码为 bytes。
-// 任一非法则写 400 响应并返回 ok=false。
+// 任一非法（非 hex 或长度不符）则写 400 响应并返回 ok=false。
+// recoveryCodeHash 必须是 32 字节（SHA-256），防弱哈希爆破。
 func decodeRegisterHexFields(c *gin.Context, req registerRequest) (hash, salt, nonce, ct []byte, ok bool) {
 	type field struct {
-		name, raw string
-		dest      *[]byte
+		name     string
+		raw      string
+		dest     *[]byte
+		wantLen  int // 期望字节数，0 表示不校验
 	}
 	fields := []field{
-		{"recoveryCodeHash", req.RecoveryCodeHash, &hash},
-		{"dekSalt", req.DekSalt, &salt},
-		{"dekNonce", req.DekNonce, &nonce},
-		{"dekCt", req.DekCt, &ct},
+		{"recoveryCodeHash", req.RecoveryCodeHash, &hash, 32}, // SHA-256 = 32 字节
+		{"dekSalt", req.DekSalt, &salt, 0},
+		{"dekNonce", req.DekNonce, &nonce, 0},
+		{"dekCt", req.DekCt, &ct, 0},
 	}
 	for _, f := range fields {
 		decoded, err := hex.DecodeString(f.raw)
@@ -100,6 +104,13 @@ func decodeRegisterHexFields(c *gin.Context, req registerRequest) (hash, salt, n
 			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
 				"code":    "bad_request",
 				"message": f.name + " 不是合法 hex",
+			}})
+			return nil, nil, nil, nil, false
+		}
+		if f.wantLen > 0 && len(decoded) != f.wantLen {
+			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
+				"code":    "bad_request",
+				"message": f.name + " 长度必须为 " + strconv.Itoa(f.wantLen) + " 字节",
 			}})
 			return nil, nil, nil, nil, false
 		}

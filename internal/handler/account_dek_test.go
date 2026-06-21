@@ -19,7 +19,7 @@ func TestGetAccountDEK_ReturnsEnvelope(t *testing.T) {
 	wantNonce := "6e6f6e"  // "non"
 	wantCt := "6374"       // "ct"
 	accountID := env.registerAccount(t, registerBody{
-		RecoveryCodeHash: "6861", // "ha"
+		RecoveryCodeHash: testRecoveryHashHex,
 		DekSalt:          wantSalt,
 		DekNonce:         wantNonce,
 		DekCt:            wantCt,
@@ -91,7 +91,7 @@ func TestGetAccountDEK_ByRecoveryHash(t *testing.T) {
 	wantSalt := "73616c74"
 	wantNonce := "6e6f6e"
 	wantCt := "6374"
-	hashHex := "686172686172" // 任意合法 hex（"harhar"），作为 recoveryCodeHash
+	hashHex := testRecoveryHashHex // 32 字节（SHA-256）恢复码哈希
 	accountID := env.registerAccount(t, registerBody{
 		RecoveryCodeHash: hashHex,
 		DekSalt:          wantSalt,
@@ -125,11 +125,12 @@ func TestGetAccountDEK_ByRecoveryHash(t *testing.T) {
 }
 
 // TestGetAccountDEK_RecoveryHashNotFound 验证恢复码查无此户返 404。
+// 用合法长度（32 字节）但内容不存在的 hash，确保走完长度校验后到 DB 查询返回 404。
 func TestGetAccountDEK_RecoveryHashNotFound(t *testing.T) {
 	env := newTestEnv(t)
 	defer env.cleanup()
 
-	rec := env.doGET("/account/dek?recoveryCodeHash=deadbeef")
+	rec := env.doGET("/account/dek?recoveryCodeHash=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", rec.Code)
 	}
@@ -154,5 +155,18 @@ func TestGetAccountDEK_BadRecoveryHashHex(t *testing.T) {
 	rec := env.doGET("/account/dek?recoveryCodeHash=zzz")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400（非法 hex）", rec.Code)
+	}
+}
+
+// TestGetAccountDEK_RecoveryHashWrongLength 验证恢复码哈希长度非 32 字节返 400。
+// 防 P0-c：短哈希会被长度校验拒绝，不进 DB 查询。
+func TestGetAccountDEK_RecoveryHashWrongLength(t *testing.T) {
+	env := newTestEnv(t)
+	defer env.cleanup()
+
+	// 4 字节（合法 hex 但太短）
+	rec := env.doGET("/account/dek?recoveryCodeHash=deadbeef")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400（长度非 32 字节）", rec.Code)
 	}
 }

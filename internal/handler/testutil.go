@@ -25,6 +25,13 @@ func init() {
 	gin.SetMode(gin.TestMode)
 }
 
+// TestRecoveryHashHex 是测试用的 32 字节（SHA-256）恢复码哈希 hex（64 个 hex 字符）。
+// 导出供 server 等其他测试包复用，避免硬编码短哈希（会被长度校验拒绝）。
+const TestRecoveryHashHex = "0000000000000000000000000000000000000000000000000000000000000000"
+
+// testRecoveryHashHex 是 TestRecoveryHashHex 的包内别名，保持 handler 内测试简洁。
+const testRecoveryHashHex = TestRecoveryHashHex
+
 // testEnv 是 handler 测试的运行环境，持有真实 DB 后端与依赖。
 // 随 Task 推进增量添加字段（BlockStore、ManifestService 等）。
 type testEnv struct {
@@ -135,7 +142,7 @@ func (e *testEnv) registerAccountFull(t *testing.T, body registerBody) (string, 
 // 设备注册测试需用同一 recoveryCodeHash 模拟客户端正确输入。
 func (e *testEnv) registerAccountWithHash(t *testing.T) (string, string) {
 	t.Helper()
-	hashHex := "686173686564" // "hashed" 的 hex，作为约定恢复码哈希
+	hashHex := testRecoveryHashHex
 	accountID := e.registerAccount(t, registerBody{
 		RecoveryCodeHash: hashHex,
 		DekSalt:          "73616c74",
@@ -177,7 +184,7 @@ func (e *testEnv) registerSignedAccount(t *testing.T) (string, string, string, e
 	if err != nil {
 		t.Fatalf("生成密钥对失败：%v", err)
 	}
-	hashHex := "686173686564"
+	hashHex := testRecoveryHashHex
 	accountID, deviceID := e.registerAccountFull(t, registerBody{
 		RecoveryCodeHash: hashHex,
 		DekSalt:          "73616c74",

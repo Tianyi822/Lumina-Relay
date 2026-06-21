@@ -1,10 +1,10 @@
 package handler
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -62,10 +62,10 @@ func TestDeviceRegister_BadRecoveryCode(t *testing.T) {
 
 	accountID, _ := env.registerAccountWithHash(t)
 
-	// 故意用错误的 hash（合法 hex 但内容错）
+	// 故意用错误的 hash（32 字节合法长度但内容错，确保走 service 层校验返回 401）
 	body := map[string]string{
 		"accountId":        accountID,
-		"recoveryCodeHash": hex.EncodeToString([]byte("totally-wrong")),
+		"recoveryCodeHash": "00" + strings.Repeat("11", 31), // 32 字节，内容错误
 		"devicePubKey":     "aabbcc",
 		"deviceName":       "laptop",
 	}
@@ -97,7 +97,7 @@ func TestListDevices_ReturnsActive(t *testing.T) {
 	// 注册第二台设备（用同一 recoveryCodeHash）
 	rec := env.doPOST("/device/register", map[string]string{
 		"accountId":        accountID,
-		"recoveryCodeHash": "686173686564",
+		"recoveryCodeHash": testRecoveryHashHex,
 		"devicePubKey":     "aabbcc",
 		"deviceName":       "second-dev",
 	})
