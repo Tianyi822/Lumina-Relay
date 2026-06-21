@@ -35,6 +35,14 @@ func Error(msg string, fields ...Field) { global.Error(msg, fields...) }
 func With(fields ...Field) Logger { return global.With(fields...) }
 func Sync() error                 { return global.Sync() }
 
+// SetGlobalForTest 替换全局 logger 并返回恢复函数。仅供测试使用。
+// 典型用法：defer SetGlobalForTest(fake)() —— 用完即恢复，避免污染其他测试。
+func SetGlobalForTest(l Logger) func() {
+	prev := global
+	global = l
+	return func() { global = prev }
+}
+
 // 字段构造器
 func String(k, v string) Field      { return Field{Key: k, Val: v} }
 func Int(k string, v int) Field     { return Field{Key: k, Val: v} }

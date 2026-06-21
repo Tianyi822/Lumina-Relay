@@ -29,6 +29,9 @@ type Deps struct {
 // 限流器在路由层按 sync-design §6.6 配置。
 func NewRouter(deps Deps) *gin.Engine {
 	r := gin.New()
+	// 访问日志中间件放在最前：记录所有请求（含被限流/认证拒绝的），
+	// 按 status 分级（2xx/3xx Info、4xx Warn、5xx Error），GET /health 短路跳过。
+	r.Use(middleware.AccessLog())
 	r.GET("/health", Health)
 	r.POST("/account/register", RegisterAccount(deps))
 	// GET /account/dek 限流 10次/分钟/IP（防恢复码爆破，sync-design §696）
