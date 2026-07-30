@@ -19,7 +19,14 @@ import (
 
 // shutdownTimeout 是优雅关闭时等待在途请求结束的最大时长。
 // 与 sync-design §5.6 优雅退出 5s 超时对齐。
-const shutdownTimeout = 5 * time.Second
+const (
+	shutdownTimeout   = 5 * time.Second
+	readHeaderTimeout = 10 * time.Second
+	readTimeout       = 30 * time.Second
+	writeTimeout      = 30 * time.Second
+	idleTimeout       = 60 * time.Second
+	maxHeaderBytes    = 64 << 10
+)
 
 // 监听地址在 Serve 前通过 net.Listen 确定，存此包级变量供测试/运维读取。
 var (
@@ -38,6 +45,9 @@ func Run(ctx context.Context, cfg config.AppConfig, deps handler.Deps) error {
 	router := handler.NewRouter(deps)
 
 	listenAddr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
+	addrMu.Lock()
+	addr = ""
+	addrMu.Unlock()
 	ln, err := net.Listen("tcp", listenAddr)
 	if err != nil {
 		return fmt.Errorf("监听 %s：%w", listenAddr, err)
@@ -47,11 +57,7 @@ func Run(ctx context.Context, cfg config.AppConfig, deps handler.Deps) error {
 	addr = ln.Addr().String()
 	addrMu.Unlock()
 
-	srv := &http.Server{
-		Handler: router,
-		// ReadHeaderTimeout 防 slowloris 攻击。
-		ReadHeaderTimeout: 10 * time.Second,
-	}
+	srv := newHTTPServer(router)
 
 	serveErr := make(chan error, 1)
 	go func() {
@@ -77,6 +83,17 @@ func Run(ctx context.Context, cfg config.AppConfig, deps handler.Deps) error {
 		}
 		// 等 Serve goroutine 退出。
 		return <-serveErr
+	}
+}
+
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxHeaderBytes,
 	}
 }
 

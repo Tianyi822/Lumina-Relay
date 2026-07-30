@@ -71,4 +71,3 @@ func TestSecurityHeaders_HSTS_WithForwardedProto(t *testing.T) {
 		t.Fatal("X-Forwarded-Proto=https 应发 HSTS，但头为空")
 	}
 }
-

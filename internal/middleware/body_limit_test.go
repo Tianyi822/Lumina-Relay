@@ -78,13 +78,12 @@ func TestBodyLimitBlock_AllowsUnderLimit(t *testing.T) {
 	}
 }
 
-// TestHandleBodyReadError_MaxBytesErrorAbortsOnly 验证当读取错误是 *http.MaxBytesError
-//（MaxBytesReader 触发的超限）时，HandleBodyReadError 仅 Abort 中间件链，
-// 不再写第二个响应（C1/C2 回归：防止双写损坏）。
+// TestHandleBodyReadError_MaxBytesErrorWrites413 验证当读取错误是 *http.MaxBytesError
+// （MaxBytesReader 触发的超限）时，HandleBodyReadError 显式写 413 响应。
 //
-// 注：真实部署中 MaxBytesReader 会先向 ResponseWriter 写 413；
-// httptest.ResponseRecorder 不触发该副作用，故此处只验证"不再追加写"。
-func TestHandleBodyReadError_MaxBytesErrorAbortsOnly(t *testing.T) {
+// 关键回归：gin 的 ResponseWriter 不触发 MaxBytesReader 的自动 413，
+// 故必须显式写，否则超大上传静默返回 200（C1.1 bug）。
+func TestHandleBodyReadError_MaxBytesErrorWrites413(t *testing.T) {
 	r := gin.New()
 	r.GET("/x", func(c *gin.Context) {
 		maxErr := &http.MaxBytesError{Limit: maxJSONBody}
@@ -92,18 +91,18 @@ func TestHandleBodyReadError_MaxBytesErrorAbortsOnly(t *testing.T) {
 		if !handled {
 			t.Error("MaxBytesError 应被处理（返回 true）")
 		}
-		// 若 Abort 生效，后续代码不执行；此处手动写以验证它"不应该被到达"
-		// （AbortWithStatusJSON 之后的代码 gin 仍会执行，除非显式 return；
-		//  handler 里有 return，所以这行测的是"没触发 fallback 写"）
 	})
 	r.GET("/y", func(c *gin.Context) {
 		// 普通 read 错误：应走 fallback 写 fallbackCode
 		HandleBodyReadError(c, io.ErrUnexpectedEOF, http.StatusBadRequest, "bad_request", "读取失败")
 	})
 
-	// /x：MaxBytesError 分支，body 不含 fallback 消息
+	// /x：MaxBytesError 分支，必须返 413 且不含 fallback 消息
 	rec := httptest.NewRecorder()
 	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("MaxBytesError 分支 status = %d, want 413", rec.Code)
+	}
 	if strings.Contains(rec.Body.String(), "不应写入此消息") {
 		t.Errorf("MaxBytesError 分支不应写 fallback body：%q", rec.Body.String())
 	}
@@ -116,6 +115,34 @@ func TestHandleBodyReadError_MaxBytesErrorAbortsOnly(t *testing.T) {
 	}
 	if !strings.Contains(rec2.Body.String(), "读取失败") {
 		t.Errorf("普通错误应写 fallback body：%q", rec2.Body.String())
+	}
+}
+
+// TestBodyLimit_ChunkedOversizedReturns413 验证流式（无 Content-Length）超大 body
+// 经 BodyLimit + 真实 ReadAll 触发 MaxBytesReader 后，HandleBodyReadError 写 413。
+// 这是 C1.1 的端到端回归：之前 c.Abort() 会返回 200 空体。
+//
+// 构造：BodyLimitJSON → handler 调 io.ReadAll（模拟 signed/PutBlock 的读取）。
+// body 置 ContentLength=-1 模拟 chunked，绕过 ContentLength>max 预检，
+// 强制走 MaxBytesReader 超限路径。
+func TestBodyLimit_ChunkedOversizedReturns413(t *testing.T) {
+	r := gin.New()
+	r.Use(BodyLimitJSON())
+	r.POST("/x", func(c *gin.Context) {
+		_, err := io.ReadAll(c.Request.Body)
+		if HandleBodyReadError(c, err, http.StatusBadRequest, "bad_request", "读取失败") {
+			return
+		}
+		c.Status(http.StatusOK)
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(strings.Repeat("x", 70*1024)))
+	req.ContentLength = -1 // 模拟 chunked：绕过 ContentLength 预检，走 MaxBytesReader 路径
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("chunked 超限 status = %d, want 413（C1.1：不应是 200）", rec.Code)
 	}
 }
 

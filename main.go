@@ -103,6 +103,13 @@ func runServer(cfg config.AppConfig) {
 	defer backend.Close()
 	q := db.New(backend)
 
+	// Relay instanceId 与数据库绑定并持久化，用于客户端 pinning 与所有 proof。
+	instanceID, err := q.GetOrCreateInstanceID(ctx)
+	if err != nil {
+		logger.Error("初始化 Relay instanceId 失败，退出", logger.Err(err))
+		return
+	}
+
 	// JWT secret：首次启动随机生成并持久化到 ~/.lumina-relay/jwt_secret，
 	// 后续启动复用同一密钥。多用户场景下避免重启全员登出。
 	jwtSecretPath, err := config.DefaultJWTSecretPath()
@@ -116,15 +123,55 @@ func runServer(cfg config.AppConfig) {
 		return
 	}
 
-	// 构造依赖
+	blockStore := store.NewBlockStore(blocksDir)
+	if err := blockStore.CleanupTempFiles(time.Hour); err != nil {
+		logger.Warn("清理遗留块临时文件失败", logger.Err(err))
+	}
+	challenges := auth.NewChallengeStore(4096)
+	eventHub := service.NewEventHub()
+	eventTickets := service.NewEventTicketStore()
+	blocksService := service.NewBlocksService(q, blockStore)
+	if collected, err := blocksService.CollectGarbage(ctx); err != nil {
+		logger.Warn("启动时回收过期孤儿块失败", logger.Err(err))
+	} else if collected > 0 {
+		logger.Info("启动时已回收过期孤儿块", logger.Int("count", collected))
+	}
+	gcDone := make(chan struct{})
+	go func() {
+		defer close(gcDone)
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				collected, err := blocksService.CollectGarbage(ctx)
+				if err != nil {
+					logger.Warn("回收过期孤儿块失败", logger.Err(err))
+				} else if collected > 0 {
+					logger.Info("已回收过期孤儿块", logger.Int("count", collected))
+				}
+			}
+		}
+	}()
+	defer func() {
+		stop()
+		<-gcDone
+	}()
+
+	// 构造无版本协议依赖。
 	deps := handler.Deps{
-		AccountService:  service.NewAccountService(q),
-		DeviceService:   service.NewDeviceService(q),
+		ConnectionService: service.NewConnectionService(
+			q, challenges, instanceID, jwtSecret, cfg.Storage.QuotaMB),
+		SyncService:     service.NewSyncService(q, instanceID, jwtSecret),
 		ManifestService: service.NewManifestService(q),
-		BlocksService:   service.NewBlocksService(q, store.NewBlockStore(blocksDir), cfg.Storage.QuotaMB),
+		BlocksService:   blocksService,
+		EventHub:        eventHub,
+		EventTickets:    eventTickets,
 		JWTSecret:       jwtSecret,
 		Queries:         q,
-		NonceStore:      auth.NewNonceStore(5 * time.Minute),
+		InstanceID:      instanceID,
 	}
 
 	logger.Info("HTTP 服务即将监听",

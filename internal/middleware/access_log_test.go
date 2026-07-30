@@ -12,8 +12,8 @@ import (
 
 // fakeLogger 实现 logger.Logger，捕获调用供断言。仅测试用。
 type fakeLogger struct {
-	levels    []string             // 每次调用的级别
-	fieldsList [][]logger.Field    // 每次调用的字段
+	levels     []string         // 每次调用的级别
+	fieldsList [][]logger.Field // 每次调用的字段
 }
 
 func (f *fakeLogger) Debug(msg string, fields ...logger.Field) {

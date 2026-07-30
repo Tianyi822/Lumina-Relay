@@ -1,16 +1,24 @@
 package auth
 
 import (
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
 )
 
-// Claims 是 session JWT 的载荷，含账户与设备标识。
+const (
+	sessionAudience = "lumina-relay"
+	sessionTTL      = 24 * time.Hour
+)
+
 type Claims struct {
 	AccountID string
 	DeviceID  string
+	TokenID   string
+	ExpiresAt time.Time
 }
 
 type sessionClaims struct {
@@ -19,42 +27,72 @@ type sessionClaims struct {
 	jwt.RegisteredClaims
 }
 
-// IssueToken 签发 HS256 session token。
-func IssueToken(secret []byte, accountID, deviceID string) (string, error) {
+type SessionToken struct {
+	Token     string
+	ExpiresAt int64
+	TokenID   string
+}
+
+func IssueSessionToken(
+	secret []byte,
+	instanceID, accountID, deviceID string,
+	now time.Time,
+) (SessionToken, error) {
+	rawID := make([]byte, 24)
+	if _, err := rand.Read(rawID); err != nil {
+		return SessionToken{}, fmt.Errorf("生成 session id：%w", err)
+	}
+	tokenID := base64.RawURLEncoding.EncodeToString(rawID)
+	expires := now.Add(sessionTTL)
 	claims := sessionClaims{
 		AccountID: accountID,
 		DeviceID:  deviceID,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
-			IssuedAt:  jwt.NewNumericDate(time.Now()),
+			Issuer:    instanceID,
+			Subject:   deviceID,
+			Audience:  jwt.ClaimStrings{sessionAudience},
+			ExpiresAt: jwt.NewNumericDate(expires),
+			IssuedAt:  jwt.NewNumericDate(now),
+			ID:        tokenID,
 		},
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	signed, err := token.SignedString(secret)
 	if err != nil {
-		return "", fmt.Errorf("签发 token：%w", err)
+		return SessionToken{}, fmt.Errorf("签发 session：%w", err)
 	}
-	return signed, nil
+	return SessionToken{Token: signed, ExpiresAt: expires.Unix(), TokenID: tokenID}, nil
 }
 
-// ParseToken 解析并校验 HS256 session token，返回 Claims。
-func ParseToken(secret []byte, tokenStr string) (Claims, error) {
-	token, err := jwt.ParseWithClaims(tokenStr, &sessionClaims{}, func(t *jwt.Token) (any, error) {
-		if t.Method != jwt.SigningMethodHS256 {
-			return nil, fmt.Errorf("不支持的签名算法：%v", t.Header["alg"])
-		}
-		return secret, nil
-	})
+func ParseSessionToken(secret []byte, instanceID, tokenText string) (Claims, error) {
+	parsed, err := jwt.ParseWithClaims(
+		tokenText,
+		&sessionClaims{},
+		func(token *jwt.Token) (any, error) {
+			if token.Method != jwt.SigningMethodHS256 {
+				return nil, fmt.Errorf("JWT 算法非法")
+			}
+			return secret, nil
+		},
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithIssuer(instanceID),
+		jwt.WithAudience(sessionAudience),
+		jwt.WithExpirationRequired(),
+		jwt.WithIssuedAt(),
+	)
 	if err != nil {
-		return Claims{}, fmt.Errorf("解析 token：%w", err)
+		return Claims{}, fmt.Errorf("解析 session：%w", err)
 	}
-
-	claims, ok := token.Claims.(*sessionClaims)
-	if !ok || !token.Valid {
-		return Claims{}, fmt.Errorf("无效 token")
+	value, ok := parsed.Claims.(*sessionClaims)
+	if !ok || !parsed.Valid || value.Subject == "" || value.ID == "" ||
+		value.Subject != value.DeviceID || value.AccountID == "" ||
+		value.ExpiresAt == nil {
+		return Claims{}, fmt.Errorf("session claims 非法")
 	}
 	return Claims{
-		AccountID: claims.AccountID,
-		DeviceID:  claims.DeviceID,
+		AccountID: value.AccountID,
+		DeviceID:  value.DeviceID,
+		TokenID:   value.ID,
+		ExpiresAt: value.ExpiresAt.Time,
 	}, nil
 }

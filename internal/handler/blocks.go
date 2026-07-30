@@ -1,118 +1,92 @@
 package handler
 
 import (
-	"errors"
-	"io"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 
-	"lumina-relay/internal/apperr"
 	"lumina-relay/internal/middleware"
-	"lumina-relay/internal/service"
 )
 
-// blocksHaveRequest 是 POST /blocks/have 的请求体。
-type blocksHaveRequest struct {
-	IDs []string `json:"ids" binding:"required"`
+type missingBlocksRequest struct {
+	IDs []string `json:"ids"`
 }
 
-// blocksHaveResponse 是 POST /blocks/have 的响应。
-type blocksHaveResponse struct {
-	Missing []string `json:"missing"`
-}
-
-// maxBlockIDsPerHave 是单次 have 查询的上限（sync-design §656）。
-const maxBlockIDsPerHave = 1000
-
-// BlocksHave 返回 POST /blocks/have 的 handler（Session 认证）。
-func BlocksHave(deps Deps) gin.HandlerFunc {
+func MissingBlocks(deps Deps) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		accountID := c.GetString("accountId")
-		var req blocksHaveRequest
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-				"code": "bad_request", "message": "请求体格式错误",
-			}})
+		var request missingBlocksRequest
+		if err := decodeJSON(c, &request); err != nil {
+			writeBadRequest(c)
 			return
 		}
-		if len(req.IDs) > maxBlockIDsPerHave {
-			c.JSON(http.StatusBadRequest, gin.H{"error": gin.H{
-				"code": "bad_request", "message": "ids 数量超上限（1000）",
-			}})
-			return
-		}
-		missing, err := deps.BlocksService.Have(c.Request.Context(), accountID, req.IDs)
+		missing, err := deps.BlocksService.Missing(
+			c.Request.Context(), c.GetString(middleware.CtxAccountID),
+			c.GetString(middleware.CtxGroupID), request.IDs)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
-				"code": "internal_error", "message": "查询失败",
-			}})
+			writeServiceError(c, err)
 			return
 		}
-		if missing == nil {
-			missing = []string{}
-		}
-		c.JSON(http.StatusOK, blocksHaveResponse{Missing: missing})
+		c.JSON(http.StatusOK, gin.H{"missing": missing})
 	}
 }
 
-// PutBlock 返回 PUT /blocks/:blockId 的 handler（Session + Signed）。
-// body 为原始密文字节（Content-Type: application/octet-stream）。
-// 响应 201 新建 / 200 已存在（幂等）；hash 不符 400。
 func PutBlock(deps Deps) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		accountID := c.GetString("accountId")
-		blockID := c.Param("blockId")
-
-		data, err := io.ReadAll(c.Request.Body)
-		if middleware.HandleBodyReadError(c, err, http.StatusBadRequest, "bad_request", "读取 body 失败") {
+		data, ok := readRawBody(c)
+		if !ok {
 			return
 		}
-
-		out, err := deps.BlocksService.Put(c.Request.Context(), service.BlocksPutInput{
-			AccountID: accountID, BlockID: blockID, Data: data,
-		})
+		result, err := deps.BlocksService.Put(
+			c.Request.Context(), c.GetString(middleware.CtxAccountID),
+			c.GetString(middleware.CtxDeviceID), c.Param("blockId"), data)
 		if err != nil {
-			switch {
-			case errors.Is(err, service.ErrBlockHashMismatch):
-				apperr.New(apperr.CodeBlockHashMismatch, "块 hash 校验失败").WriteJSON(c.Writer)
-			case errors.Is(err, service.ErrQuotaExceeded):
-				apperr.New(apperr.CodeQuotaExceeded, "存储配额已满").WriteJSON(c.Writer)
-			default:
-				c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
-					"code": "internal_error", "message": "上传块失败",
-				}})
-			}
+			writeServiceError(c, err)
 			return
 		}
-		if out.Created {
-			c.Status(http.StatusCreated)
-		} else {
-			c.Status(http.StatusOK)
+		status := http.StatusOK
+		if result.Created {
+			status = http.StatusCreated
 		}
+		c.JSON(status, gin.H{"created": result.Created})
 	}
 }
 
-// GetBlock 返回 GET /blocks/:blockId 的 handler（Session 认证）。
-// 返回原始密文字节。
 func GetBlock(deps Deps) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		accountID := c.GetString("accountId")
-		blockID := c.Param("blockId")
-
-		data, err := deps.BlocksService.Get(c.Request.Context(), accountID, blockID)
+		data, err := deps.BlocksService.Get(
+			c.Request.Context(), c.GetString(middleware.CtxAccountID),
+			c.GetString(middleware.CtxGroupID), c.Param("blockId"))
 		if err != nil {
-			if errors.Is(err, service.ErrBlockNotFound) {
-				c.JSON(http.StatusNotFound, gin.H{"error": gin.H{
-					"code": "block_not_found", "message": "块不存在",
-				}})
-				return
-			}
-			c.JSON(http.StatusInternalServerError, gin.H{"error": gin.H{
-				"code": "internal_error", "message": "读取块失败",
-			}})
+			writeServiceError(c, err)
 			return
 		}
 		c.Data(http.StatusOK, "application/octet-stream", data)
+	}
+}
+
+type pruneBlocksRequest struct {
+	GroupRevision int64    `json:"groupRevision"`
+	Keep          []string `json:"keep"`
+}
+
+func PruneBlocks(deps Deps) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var request pruneBlocksRequest
+		if err := decodeJSON(c, &request); err != nil {
+			writeBadRequest(c)
+			return
+		}
+		result, err := deps.BlocksService.Prune(
+			c.Request.Context(), c.GetString(middleware.CtxAccountID),
+			c.GetString(middleware.CtxDeviceID),
+			c.GetString(middleware.CtxGroupID), request.GroupRevision, request.Keep)
+		if err != nil {
+			writeServiceError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"reclaimedBytes":  result.ReclaimedBytes,
+			"orphanedObjects": len(result.OrphanBlockIDs),
+		})
 	}
 }

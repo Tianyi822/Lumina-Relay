@@ -5,12 +5,9 @@
 package main
 
 import (
-	"bytes"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"net/http"
 	"sort"
 	"sync"
@@ -50,7 +47,7 @@ func (s *stats) percentile(p float64) time.Duration {
 
 func main() {
 	target := flag.String("target", "http://localhost:8443", "目标服务地址")
-	endpoint := flag.String("endpoint", "health", "端点：health | register")
+	endpoint := flag.String("endpoint", "health", "端点：health | discovery")
 	duration := flag.Duration("duration", 10*time.Second, "每档持续时长")
 	flag.Parse()
 
@@ -129,18 +126,8 @@ func doReq(client *http.Client, baseURL, endpoint string) (int, error) {
 		resp.Body.Close()
 		return resp.StatusCode, nil
 
-	case "register":
-		// 每次用随机 hex 填充，确保唯一（account_id 由服务端 uuid 生成）
-		body := map[string]string{
-			"recoveryCodeHash": randHex(32),
-			"dekSalt":          randHex(16),
-			"dekNonce":         randHex(12),
-			"dekCt":            randHex(48),
-			"devicePubKey":     randHex(32),
-			"deviceName":       "loadtest",
-		}
-		raw, _ := json.Marshal(body)
-		resp, err := client.Post(baseURL+"/account/register", "application/json", bytes.NewReader(raw))
+	case "discovery":
+		resp, err := client.Get(baseURL + "/.well-known/lumina-relay")
 		if err != nil {
 			return 0, err
 		}
@@ -149,14 +136,6 @@ func doReq(client *http.Client, baseURL, endpoint string) (int, error) {
 		return resp.StatusCode, nil
 	}
 	return 0, fmt.Errorf("unknown endpoint")
-}
-
-func randHex(n int) string {
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = byte(rand.IntN(256))
-	}
-	return fmt.Sprintf("%x", b)
 }
 
 func fmtDur(d time.Duration) string {

@@ -18,7 +18,7 @@ import (
 // 显著提升并发吞吐，代价是多了 -wal/-shm 辅助文件（数据目录需可写）。
 //
 // foreign_keys=ON：强制外键约束（accounts↔devices↔blocks），防御性兜底。
-const sqlitePragmas = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
+const sqlitePragmas = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_txlock=immediate"
 
 // withPragmas 给原始 DSN（通常是文件路径）附加 pragma 查询参数。
 // 若 DSN 已含查询串则用 & 拼接，否则用 ? 起始。

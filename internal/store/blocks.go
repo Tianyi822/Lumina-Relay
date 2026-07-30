@@ -11,6 +11,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 // 哨兵错误。调用方用 errors.Is 判定，不应比较字符串。
@@ -42,9 +44,8 @@ func (s *BlockStore) PathFor(id string) string {
 	return filepath.Join(s.root, id[0:2], id[0:4], id)
 }
 
-// PutNew 写入一个新块。若已存在则返回 ErrAlreadyExists 且不覆盖既有内容。
-// 返回 created=true 表示本次创建了文件，false 表示已存在（幂等）。
-// id 长度 < minIDLen 时返回错误，避免 id 被切割到错误分桶。
+// PutNew 先在目标 shard 写临时文件并 fsync，再用 hard-link no-replace 语义
+// 原子安装；目标已存在时绝不覆盖。
 func (s *BlockStore) PutNew(id string, data []byte) (created bool, err error) {
 	if len(id) < minIDLen {
 		return false, fmt.Errorf("blockId 过短（len=%d，需 ≥%d）", len(id), minIDLen)
@@ -54,17 +55,39 @@ func (s *BlockStore) PutNew(id string, data []byte) (created bool, err error) {
 		return false, fmt.Errorf("创建分桶目录：%w", err)
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if _, err := os.Stat(path); err == nil {
+		return false, ErrAlreadyExists
+	}
+	temp, err := os.CreateTemp(filepath.Dir(path), "."+id+".tmp-")
 	if err != nil {
+		return false, fmt.Errorf("创建块临时文件：%w", err)
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(0o600); err != nil {
+		_ = temp.Close()
+		return false, fmt.Errorf("设置块临时文件权限：%w", err)
+	}
+	if _, err := temp.Write(data); err != nil {
+		_ = temp.Close()
+		return false, fmt.Errorf("写入块内容：%w", err)
+	}
+	if err := temp.Sync(); err != nil {
+		_ = temp.Close()
+		return false, fmt.Errorf("同步块内容：%w", err)
+	}
+	if err := temp.Close(); err != nil {
+		return false, fmt.Errorf("关闭块临时文件：%w", err)
+	}
+	if err := os.Link(tempPath, path); err != nil {
 		if errors.Is(err, fs.ErrExist) {
 			return false, ErrAlreadyExists
 		}
-		return false, fmt.Errorf("创建块文件：%w", err)
+		return false, fmt.Errorf("原子安装块文件：%w", err)
 	}
-	defer f.Close()
-
-	if _, err := f.Write(data); err != nil {
-		return false, fmt.Errorf("写入块内容：%w", err)
+	if dir, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = dir.Sync()
+		_ = dir.Close()
 	}
 	return true, nil
 }
@@ -91,4 +114,43 @@ func (s *BlockStore) Exists(id string) bool {
 	}
 	_, err := os.Stat(s.PathFor(id))
 	return err == nil
+}
+
+// Delete 删除一个物理密文块。不存在视为幂等成功。
+// 数据库层必须先确认已经没有任何账户关联，调用方不得据此实现越权删除。
+func (s *BlockStore) Delete(id string) error {
+	if len(id) < minIDLen {
+		return fmt.Errorf("blockId 过短（len=%d，需 ≥%d）", len(id), minIDLen)
+	}
+	if err := os.Remove(s.PathFor(id)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("删除块文件：%w", err)
+	}
+	return nil
+}
+
+// CleanupTempFiles 清理崩溃遗留且超过 maxAge 的 shard 临时文件。
+func (s *BlockStore) CleanupTempFiles(maxAge time.Duration) error {
+	if maxAge <= 0 {
+		maxAge = time.Hour
+	}
+	cutoff := time.Now().Add(-maxAge)
+	return filepath.WalkDir(s.root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			if errors.Is(walkErr, fs.ErrNotExist) {
+				return nil
+			}
+			return walkErr
+		}
+		if entry.IsDir() || !strings.Contains(entry.Name(), ".tmp-") {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(path)
+		}
+		return nil
+	})
 }

@@ -1,167 +1,382 @@
-# 前端对接说明（feat/client-sync-api-alignment）
+# Lumina Relay 客户端协议
 
-> 本文档汇总后端本次改动中**前端必须知晓/修改**的契约差异与安全约束。
-> 对应分支 `feat/client-sync-api-alignment`，权威 API 详情见 `api-reference.md`。
+## 1. 产品流程
 
----
+设置页只需要 Relay 地址、用户名和密码。客户端先访问：
 
-## 一、前端必须修改的项（阻塞）
-
-### 1. 哈希算法：BLAKE2b → SHA-256
-
-前端 `feat/client-data-sync` 分支用了 libsodium `crypto_generichash`（BLAKE2b）。**后端统一且仅支持 SHA-256**。三处必须改：
-
-| 场景 | 现状（错误） | 应改为 |
-|---|---|---|
-| 写操作签名 `bodyHash` | `BLAKE2b(body)` | `hex(sha256(body))` |
-| `blockId` 计算 | `BLAKE2b(ciphertext)` | `hex(sha256(ciphertext))` |
-| `blocks/have` 查重 id | BLAKE2b hex | sha256 hex |
-
-**不改的后果**：所有 PUT/DELETE 验签失败、块上传返回 `block_hash_mismatch`、查重结果错乱。
-
-### 2. 恢复码反查路径：`/account` → `/account/dek`
-
-前端 issue 原文写的是 `GET /account?recoveryCodeHash=<hex>`。**后端没有 `/account` 这个 GET 路由**，实现为：
-
-```
-GET /account/dek?recoveryCodeHash=<hex>
+```http
+GET /.well-known/lumina-relay
 ```
 
-**不改的后果**：换设备流程第 3 步 404。
+随后调用 `POST /connections/start`。响应中的 `accountExists` 决定客户端完成注册还是登录，但页面不需要让用户选择：
 
-响应结构（recoveryCodeHash 分支，比 accountId 分支多一个 `accountId` 字段）：
+- `false`：客户端生成 accountId、随机 DEK、密码派生登录 key、DEK envelope、account-auth key 和设备 key，提交创建证明；
+- `true`：客户端用返回的 salt 从密码派生登录 key，签署 challenge 和新设备身份。
+
+每次密码登录得到的设备都处于新的空白同步组。成功响应中的 `hasOtherSyncData` 只用于提示“其他设备存在可同步数据”，不会自动读取旧数据。
+
+日常启动应优先使用已经保存在安全存储中的 deviceId 和设备私钥，通过 `/session-challenges`、`/sessions` 续期，不再要求密码。
+
+## 2. 发现、连接与 session API
+
+### `GET /.well-known/lumina-relay`
+
+客户端首先调用此接口，以 pin `instanceId`、校准时间并读取限制：
+
 ```json
 {
-  "accountId": "uuid",
-  "dekEnvelope": { "salt": "hex", "nonce": "hex", "ct": "hex" }
+  "protocol": "lumina-relay",
+  "instanceId": "persistent-random-id",
+  "serverTimeMs": 1784304000000,
+  "capabilities": [
+    "password-proof",
+    "device-proof",
+    "sync-groups",
+    "device-manifests",
+    "websocket-events"
+  ],
+  "limits": {
+    "maxJsonBytes": 65536,
+    "maxManifestBytes": 4194304,
+    "maxBlockBytes": 1048576,
+    "maxMissingIds": 1000,
+    "maxDeviceNameBytes": 128,
+    "blockGcGraceSeconds": 86400
+  }
 }
 ```
 
-### 3. `recoveryCodeHash` 必须为 32 字节
+### `POST /connections/start`
 
-注册账户（`POST /account/register`）、注册设备（`POST /device/register`）、恢复码反查（`GET /account/dek`）三处的 `recoveryCodeHash` **都必须是 SHA-256 的 32 字节输出（64 个 hex 字符）**。
+请求为 `{"username":"alice"}`。用户名限定 3–64 个 ASCII 字母、数字、点、下划线和连字符，服务端统一转小写。
 
-非 32 字节 → `400 bad_request`。这是防短哈希爆破的硬约束，前端必须用标准 SHA-256 生成恢复码哈希。
-
-### 4. 恢复码失败锁定（新增）
-
-`POST /device/register` 同一账户恢复码**连续失败 5 次**后，该账户锁定 **15 分钟**：
-- 锁定期间即使恢复码正确也返回 `429 rate_limited`
-- 响应：`{ "error": { "code": "rate_limited", "message": "恢复码尝试过多，请稍后再试" } }`
-- 锁定**过期后自动恢复**（失败计数清零，不再因单次失误重锁）
-- 成功注册后计数清零
-
-**账户不存在与恢复码错误统一返回 `401 bad_recovery_code`**（防账户存在性枚举）：前端无法区分"账户不存在"和"恢复码错误"，按恢复码错误处理即可。
-
-**前端需处理**：换设备流程收到 429 时，提示用户"尝试过多，请 15 分钟后重试"，不要无限重试。
-
-### 5. `device/register` 状态码：201 → 200（mock 对齐）
-
-后端 `POST /device/register` 返回 **200**（非 201）。前端若用 `response.ok`（200-299）判断不受影响；若 mock 硬断言 `=== 201`，需改为 200。
-
-> 注：`POST /account/register` 仍是 **201**（创建资源），这两个端点状态码不同，别混淆。
-
----
-
-## 二、时间戳单位约定（易踩坑）
-
-| 字段 | 单位 | 出现位置 |
-|---|---|---|
-| `createdAt`、`lastSeenAt`（GET /devices） | **Unix 秒**（10 位） | 响应体 |
-| `X-Timestamp`（签名头） | **Unix 毫秒**（13 位） | 请求头 |
-
-后端存储/响应的时间戳统一是**秒**。前端不要把 `lastSeenAt`/`createdAt` 当毫秒处理（否则显示成 1970 年）。
-
----
-
-## 三、新增端点：GET /devices
-
-```
-GET /devices
-Authorization: Bearer <sessionToken>
-```
-
-响应 `200`（数组，不含已吊销设备）：
 ```json
-[
-  {
-    "deviceId": "uuid",
-    "deviceName": "string",
-    "devicePubKey": "hex",
-    "createdAt": 1700000000,
-    "lastSeenAt": 1700000000
+{
+  "accountExists": true,
+  "attemptId": "base64url",
+  "challenge": "base64url-32-bytes",
+  "authSalt": "base64url-16-bytes",
+  "expiresAt": 1784304300,
+  "kdf": {
+    "name": "argon2id",
+    "memoryKiB": 65536,
+    "iterations": 3,
+    "parallelism": 1,
+    "outputBytes": 32
   }
-]
+}
 ```
 
-`lastSeenAt` 在每次 Session 认证成功时更新。空账户返回 `[]`（非 `null`）。
+### `POST /connections/complete`
 
----
+注册和已有账号登录都提交以下字段：
 
-## 四、请求体大小限制（新增，防 OOM）
+```json
+{
+  "attemptId": "...",
+  "deviceId": "client-generated-canonical-uuid",
+  "deviceName": "auto-derived name",
+  "devicePublicKey": "base64url-32-bytes",
+  "loginProof": "base64url-64-bytes",
+  "deviceProof": "base64url-64-bytes"
+}
+```
 
-| 端点类型 | 上限 | 超限响应 |
+仅注册时还要提交：
+
+```json
+{
+  "accountId": "client-generated-canonical-uuid",
+  "loginPublicKey": "base64url-32-bytes",
+  "accountAuthPublicKey": "base64url-32-bytes",
+  "dekEnvelope": "base64url-72-bytes",
+  "accountProof": "base64url-64-bytes"
+}
+```
+
+成功时返回：
+
+```json
+{
+  "accountExists": true,
+  "session": {
+    "token": "opaque-jwt",
+    "expiresAt": 1784390400,
+    "proofBinding": "opaque-jti"
+  },
+  "bootstrap": {
+    "accountId": "uuid",
+    "username": "alice",
+    "deviceId": "uuid",
+    "dekEnvelope": "base64url",
+    "accountAuthPublicKey": "base64url-32-bytes",
+    "cryptoStateRevision": 1,
+    "dekEpoch": 1,
+    "syncGroupId": "uuid",
+    "groupRevision": 1,
+    "hasOtherSyncData": true,
+    "serverTimeMs": 1784304000000
+  }
+}
+```
+
+并发抢注返回 `409 account_became_existing`，客户端重新调用 start；密码或 proof 错误返回 `401 invalid_credentials`，且绝不会创建设备。
+
+### `POST /session-challenges` 与 `POST /sessions`
+
+保存过设备私钥时，先提交 `{"deviceId":"uuid"}` 获取 `attemptId` 和 challenge，再以设备私钥签名 session transcript 并提交：
+
+```json
+{ "attemptId": "...", "signature": "base64url-64-bytes" }
+```
+
+响应与连接完成时的 session/bootstrap 结构相同。
+
+## 3. 密码派生
+
+密码 UTF-8 bytes 不做 Unicode normalization。固定参数：
+
+```text
+passwordRoot = Argon2id(
+  password,
+  authSalt,
+  memory=65536 KiB,
+  iterations=3,
+  parallelism=1,
+  output=32 bytes
+)
+```
+
+再使用 HKDF-SHA256 做域分离：
+
+```text
+loginSeed  = HKDF(passwordRoot, info="lumina-login-ed25519", 32)
+envelopeKey = HKDF(passwordRoot, info="lumina-dek-envelope-key", 32)
+```
+
+以上 HKDF 的 salt 为零长度空值（不是 `authSalt`；Argon2id 已使用该 salt）。
+
+`loginSeed` 只构造 Ed25519 登录 key。`envelopeKey` 只使用
+XChaCha20-Poly1305 包裹随机 32 字节 DEK。envelope 的唯一字节格式为：
+
+```text
+24-byte random nonce || Seal(DEK, aad)  // 32-byte ciphertext + 16-byte tag
+```
+
+因此 `dekEnvelope` 解码后必须恰好 72 字节。AAD 使用下节相同的长度前缀编码：
+
+```text
+lumina-dek-envelope:
+  instanceId, normalizedUsername, accountId, authSalt
+```
+
+DEK 再独立派生 account-auth Ed25519 seed：
+
+```text
+accountAuthSeed = HKDF-SHA256(
+  DEK,
+  salt=empty,
+  info="lumina-account-auth-ed25519",
+  output=32 bytes
+)
+```
+
+三类 key 不得复用。
+
+所有二进制 JSON 字段使用无 padding 的规范 base64url。
+
+## 4. 连接证明 transcript
+
+所有 transcript 都按以下方式编码，不能使用 JSON、分隔符拼接或字段排序：
+
+```text
+UTF8(domain) || repeat(uint32be(byteLength(field)) || fieldBytes)
+```
+
+字段顺序固定如下：
+
+```text
+lumina-account-create:
+  instanceId, attemptId, challenge, normalizedUsername, accountId,
+  authSalt, loginPublicKey, accountAuthPublicKey, sha256(dekEnvelope),
+  deviceId, deviceName, devicePublicKey
+
+lumina-login-proof:
+  instanceId, attemptId, normalizedUsername, challenge,
+  deviceId, deviceName, devicePublicKey
+
+lumina-device-session:
+  instanceId, attemptId, challenge, deviceId
+
+lumina-discard-sync-groups:
+  instanceId, accountId, deviceId, groupId, uint64be(groupRevision)
+```
+
+`groupId` 取 bootstrap 的 `syncGroupId`。组合并后客户端必须刷新 bootstrap，
+不能继续用合并前的 groupId/revision 构造 discard 证明。
+
+注册 transcript 分别由 login key、account-auth key 和新设备 key 签名。已有账号登录 transcript 分别由 login key 和新设备 key 签名。session transcript 由已保存的设备 key 签名；discard transcript 由 account-auth key 签名。
+
+## 5. HTTP 设备证明
+
+除连接、session challenge、health 和 discovery 外，所有 HTTP 请求同时需要：
+
+```http
+Authorization: Bearer <session token>
+X-Timestamp: <Unix 毫秒>
+X-Nonce: <base64url 16..32 随机字节>
+X-Signature: <base64url Ed25519 signature>
+```
+
+待签名内容：
+
+```text
+UPPER(method) + "\n" +
+path + "\n" +
+timestamp + "\n" +
+nonce + "\n" +
+hex(sha256(exactBodyBytes))
+```
+
+`path` 不含 query；签名接口不得携带 query。JSON 必须先序列化成最终 bytes，再对同一 bytes 计算签名并发送。服务端接受 ±5 分钟时差，nonce 在验签后持久占用。
+
+## 6. 已认证 HTTP API
+
+以下全部接口均要求上一节的 Bearer session 和设备 PoP。所有 JSON 响应均为 `application/json`；原始密文 Manifest/block 响应为 `application/octet-stream`。
+
+| 方法 | 路径 | 请求或行为 |
 |---|---|---|
-| 块上传 `PUT /blocks/:blockId` | **1 MiB** | `413 Request Entity Too Large` |
-| JSON 端点（register/manifest/blocks-have 等） | **64 KiB** | `413` |
+| GET | `/bootstrap` | 刷新当前设备的 bootstrap 根状态 |
+| POST | `/sync-codes` | 生成六位同步码 |
+| POST | `/sync-codes/redeem` | `{"code":"123456"}`，永久合并同步组 |
+| GET | `/devices` | 列出当前同步组设备 |
+| DELETE | `/devices/:deviceId` | 吊销当前组设备 |
+| POST | `/sync-groups/discard-others` | `{"groupRevision":3,"accountProof":"..."}`，永久放弃其他组 |
+| GET | `/manifests` | 列出当前组各设备最新 head 和 groupRevision |
+| GET | `/manifests/:deviceId/:version` | 下载指定密文 Manifest |
+| PUT | `/manifests/self/:baseVersion` | 上传调用设备的原始密文 Manifest，设备级 CAS |
+| POST | `/blocks/missing` | `{"ids":["64-char-sha256",...]}` |
+| PUT | `/blocks/:blockId` | 上传原始密文 block，`blockId=hex(sha256(body))` |
+| GET | `/blocks/:blockId` | 下载当前组可见 block |
+| POST | `/blocks/prune` | `{"groupRevision":3,"keep":[...]}` |
+| POST | `/event-tickets` | 创建 30 秒单次 WebSocket ticket |
 
-前端单块加密后若超 1 MiB 需自行分块。正常加密块（16-256KB）不受影响。
+`PUT /manifests/self/:baseVersion` 的同设备 CAS 冲突返回：
 
----
+```json
+{
+  "error": {
+    "code": "stale_manifest",
+    "currentVersion": 7
+  }
+}
+```
 
-## 五、安全响应头（新增，无需前端处理，仅说明）
+组合并后，旧 revision 的 prune 或 discard 返回 `409 group_changed`。所有 JSON 字段必须严格匹配定义，不接受未知字段、重复字段或 query 参数。
 
-后端现在对所有响应附加：
-- `X-Content-Type-Options: nosniff`
-- `X-Frame-Options: DENY`
-- `Referrer-Policy: no-referrer`
-- `Cache-Control: no-store`（响应不缓存）
-- `Strict-Transport-Security`（仅 HTTPS）
+## 7. 同步组
 
-原生 App 客户端通常不解析这些头，加着无害。Web 客户端（若有）受益。
+任一设备调用 `POST /sync-codes` 获得五分钟有效、单次使用的六位码。另一台同账号设备调用 `POST /sync-codes/redeem` 后，两个同步组永久合并：
 
----
+- A 邀请 B 后，A/B 均可读取双方数据；
+- A 或 B 均可继续邀请 C；
+- 同一账号但未合并的设备不能读取或探测对方 Manifest/blocks；
+- 登录不需要旧设备确认，六位码只负责数据组授权。
 
-## 六、已确认一致的项（无需改动）
+WebSocket 通过 `POST /event-tickets` 取得 30 秒单次 ticket。连接 `/events` 时发送：
 
-以下前端实现与后端一致，**不需要改**：
-- 注册端点 `POST /account/register` 请求体/响应结构 ✅
-- DEK 信封结构（salt/nonce/ct hex）✅
-- manifest 端点（GET/PUT）结构 + 乐观并发（baseVersion/stale_base 409）✅
-- 签名 canonical 串格式（`method\npath\ntimestamp\nnonce\nbodyHash`）✅
-- Ed25519 签名机制（X-Timestamp/X-Nonce/X-Signature 头）✅
-- 注册响应不含 recoveryCode（客户端本地生成）✅
-- 块上传内容寻址 ✅
-- 错误响应格式（`{ error: { code, message } }`）✅
+```http
+Sec-WebSocket-Protocol: lumina-events, ticket.<ticket>
+```
 
----
+事件只有 `ready`、`manifest_updated`、`sync_group_merged` 和 `device_revoked`。断线后必须重新拉取 `/manifests`，不能把事件当作可靠数据源。
 
-## 七、端点速查（最终状态）
+事件 payload 示例：
 
-| # | 方法 | 路径 | 认证 | 说明 |
-|---|---|---|---|---|
-| 1 | GET | `/health` | 无 | 健康检查 |
-| 2 | POST | `/account/register` | 无 | 注册账户 + 首台设备 |
-| 3 | GET | `/account/dek` | 限流 10/min | 读取 DEK（支持 `accountId` 或 `recoveryCodeHash`） |
-| 4 | POST | `/device/register` | 限流 5/min | 添加新设备（恢复码失败 5 次锁 15 分钟） |
-| 5 | PUT | `/account/dek` | Session + 签名 | 更新 DEK 信封 |
-| 6 | DELETE | `/device/:deviceId` | Session + 签名 | 吊销设备 |
-| 7 | GET | `/manifest` | Session | 读取当前 manifest |
-| 8 | PUT | `/manifest` | Session + 签名 | 提交 manifest（乐观并发） |
-| 9 | POST | `/blocks/have` | Session | 批量查重 |
-| 10 | PUT | `/blocks/:blockId` | Session + 签名 | 上传密文块（≤1 MiB） |
-| 11 | GET | `/blocks/:blockId` | Session | 下载密文块 |
-| 12 | GET | `/devices` | Session | 列出账户下设备 |
+```json
+{
+  "type": "manifest_updated",
+  "deviceId": "uuid",
+  "version": 8,
+  "groupRevision": 3,
+  "serverTimeMs": 1784304000000
+}
+```
 
----
+## 8. 设备级加密 Manifest
 
-## 八、前端改动清单（Checklist）
+每台设备只推进自己的 `/manifests/self/:baseVersion`。组内设备先读 `/manifests`，再按 `{deviceId, version}` 拉取变化的密文。
 
-- [ ] 三处哈希从 BLAKE2b 改为 SHA-256（签名 bodyHash、blockId、blocks/have id）
-- [ ] 恢复码反查路径从 `/account` 改为 `/account/dek`
-- [ ] 确保 recoveryCodeHash 是 SHA-256（32 字节 / 64 hex 字符）
-- [ ] 处理 `device/register` 的 429（锁定提示）
-- [ ] 确认 `device/register` 成功判断用 `response.ok` 而非 `=== 201`
-- [ ] 时间戳：`createdAt`/`lastSeenAt` 按秒解析，`X-Timestamp` 按毫秒
-- [ ] 块上传单块不超 1 MiB（超出自行分块）
-- [ ] 对接新增的 `GET /devices` 设备列表端点
+Manifest 明文由客户端加密前组织，最低契约为：
+
+```json
+{
+  "deviceId": "uuid",
+  "deviceVersion": 12,
+  "entries": [
+    {
+      "key": "logical-item-id-or-path",
+      "hlc": { "physicalMs": 1784304000000, "logical": 2 },
+      "writerDeviceId": "uuid",
+      "operationId": "uuid",
+      "tombstone": false,
+      "blocks": ["64-char-sha256"],
+      "size": 1234
+    }
+  ]
+}
+```
+
+整个对象加密，服务端看不到上述字段。合并时按以下元组字典序选择最后修改：
+
+```text
+(hlc.physicalMs, hlc.logical, writerDeviceId, operationId)
+```
+
+客户端通过 discovery/bootstrap 的 `serverTimeMs` 校准 HLC。删除必须写 tombstone，不能用“条目消失”表示；tombstone 保留在最新快照中，防止长期离线设备让数据复活。
+
+## 9. 块与限制
+
+- `blockId = hex(sha256(ciphertextBytes))`，统一使用 SHA-256；
+- 单块上限 1 MiB；
+- 密文 Manifest 上限 4 MiB；
+- 普通 JSON 上限 64 KiB；
+- `/blocks/missing` 每次最多 1000 个 ID；
+- 时间字段 `createdAt`/`lastSeenAt`/`expiresAt` 使用 Unix 秒，`serverTimeMs`/`X-Timestamp` 使用 Unix 毫秒。
+
+组内客户端完成 Manifest 合并后，可以用当前 `groupRevision` 调用 `/blocks/prune` 并提交仍被所有最新 heads 引用的 blockId。若组合并发生，服务端返回 `409 group_changed`，客户端必须重新计算 keep 集合。
+
+prune 或显式放弃会立即释放账号配额，但物理孤儿块还会保留 discovery
+中 `blockGcGraceSeconds` 指定的安全宽限期（当前为 24 小时）。宽限期内同一
+SHA-256 块重新上传会恢复关联；后台 GC 只删除无账号引用且无上传预留的块。
+
+## 10. 无恢复语义
+
+本期没有密码重置或恢复包。旧同步组的全部设备都丢失时，新设备继续使用空白组：
+
+- 任一旧成员设备恢复上线后仍可生成同步码；
+- 用户明确放弃旧数据时，客户端用 account-auth key 签署 discard transcript，并调用 `/sync-groups/discard-others`；
+- 服务端不会根据离线时长自动删除数据。
+
+## 11. 错误格式与稳定错误码
+
+错误统一为：
+
+```json
+{
+  "error": {
+    "code": "snake_case",
+    "message": "human readable",
+    "requestId": "uuid"
+  }
+}
+```
+
+| code | HTTP |
+|---|---:|
+| `invalid_credentials`、`invalid_device_proof`、`device_revoked`、`invalid_sync_code` | 401 |
+| `account_became_existing`、`already_joined`、`stale_manifest`、`group_changed`、`block_busy` | 409 |
+| `bad_request`、`block_hash_mismatch` | 400 |
+| `block_not_found`、`manifest_not_found` | 404 |
+| `body_too_large`、`quota_exceeded` | 413 |
+| `rate_limited` | 429 |

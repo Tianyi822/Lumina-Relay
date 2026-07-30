@@ -47,7 +47,12 @@ func TestQueries_WithTx_RollbackOnError(t *testing.T) {
 	// 先迁移好 schema 后，accounts 表存在；事务内插入一行后返回 err，
 	// 期望回滚后 accounts 表为空。
 	triggerErr := q.WithTx(ctx, func(txq *Queries) error {
-		if _, err := txq.db.ExecContext(ctx, "INSERT INTO accounts (account_id, recovery_code_hash, dek_salt, dek_nonce, dek_ct, created_at) VALUES ('rollback', x'', x'', x'', x'', 0)"); err != nil {
+		if _, err := txq.db.ExecContext(ctx, `
+INSERT INTO accounts (
+    account_id, username, auth_salt, login_public_key, dek_envelope,
+    account_auth_public_key, quota_bytes, created_at
+) VALUES ('rollback', 'rollback', zeroblob(16), zeroblob(32), zeroblob(72),
+          zeroblob(32), 1024, 0)`); err != nil {
 			return err
 		}
 		return errSimulated
@@ -69,7 +74,12 @@ func TestQueries_WithTx_CommitsOnNil(t *testing.T) {
 	ctx := context.Background()
 
 	if err := q.WithTx(ctx, func(txq *Queries) error {
-		if _, err := txq.db.ExecContext(ctx, "INSERT INTO accounts (account_id, recovery_code_hash, dek_salt, dek_nonce, dek_ct, created_at) VALUES ('commit', x'', x'', x'', x'', 0)"); err != nil {
+		if _, err := txq.db.ExecContext(ctx, `
+INSERT INTO accounts (
+    account_id, username, auth_salt, login_public_key, dek_envelope,
+    account_auth_public_key, quota_bytes, created_at
+) VALUES ('commit', 'commit', zeroblob(16), zeroblob(32), zeroblob(72),
+          zeroblob(32), 1024, 0)`); err != nil {
 			return err
 		}
 		return nil

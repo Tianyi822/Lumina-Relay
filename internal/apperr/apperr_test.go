@@ -15,9 +15,9 @@ func TestHTTPStatus(t *testing.T) {
 		err  *Error
 		want int
 	}{
-		{"bad_recovery_code→401", New(CodeBadRecoveryCode, ""), 401},
+		{"invalid_credentials→401", New(CodeInvalidCredentials, ""), 401},
 		{"device_revoked→401", New(CodeDeviceRevoked, ""), 401},
-		{"stale_base→409", New(CodeStaleBase, ""), 409},
+		{"stale_manifest→409", New(CodeStaleManifest, ""), 409},
 		{"block_hash_mismatch→400", New(CodeBlockHashMismatch, ""), 400},
 		{"quota_exceeded→413", New(CodeQuotaExceeded, ""), 413},
 		{"rate_limited→429", New(CodeRateLimited, ""), 429},
@@ -34,17 +34,17 @@ func TestHTTPStatus(t *testing.T) {
 
 // TestError_Message 验证 Error() 输出稳定可读，且能参与 errors.Is 链。
 func TestError_Message(t *testing.T) {
-	e := New(CodeStaleBase, "base version 137 is behind current 139")
-	if got := e.Error(); got != "stale_base: base version 137 is behind current 139" {
+	e := New(CodeStaleManifest, "base version 137 is behind current 139")
+	if got := e.Error(); got != "stale_manifest: base version 137 is behind current 139" {
 		t.Fatalf("Error() = %q", got)
 	}
 }
 
 // TestWriteJSON_StaleBaseIncludesExtra 验证 WriteJSON 把 extra 字段（如 currentVersion）
 // 合并进 error JSON，且 HTTP 状态码与 code 一致（409）。
-func TestWriteJSON_StaleBaseIncludesExtra(t *testing.T) {
+func TestWriteJSON_StaleManifestIncludesExtra(t *testing.T) {
 	rec := httptest.NewRecorder()
-	e := New(CodeStaleBase, "base version 137 is behind current 139").
+	e := New(CodeStaleManifest, "base version 137 is behind current 139").
 		WithExtra("currentVersion", 139)
 
 	e.WriteJSON(rec)
@@ -62,8 +62,8 @@ func TestWriteJSON_StaleBaseIncludesExtra(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("解析响应失败：%v", err)
 	}
-	if body.Error.Code != "stale_base" {
-		t.Errorf("code = %q, want stale_base", body.Error.Code)
+	if body.Error.Code != "stale_manifest" {
+		t.Errorf("code = %q, want stale_manifest", body.Error.Code)
 	}
 	if body.Error.Message == "" {
 		t.Errorf("message 不应为空")

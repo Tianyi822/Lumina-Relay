@@ -58,3 +58,29 @@ func TestNewRouter_TrustedProxyHonorsXFF(t *testing.T) {
 		t.Fatalf("ClientIP = %q, want 198.51.100.7（可信代理的 XFF 应被采纳）", observedIP)
 	}
 }
+
+// TestNewRouter_ConfiguresTrustedProxies 验证 NewRouter 真的配置了可信代理（I4.1 集成回归）。
+// 借 newTestEnv（内部调 NewRouter 构造完整 router），临时加回显 ClientIP 的路由，
+// 行为验证：非可信来源 + 伪造 XFF → ClientIP 应为 RemoteAddr（而非伪造值）。
+// 若 NewRouter 漏调 SetTrustedProxies，gin 默认信任所有代理，ClientIP 会变成伪造的 XFF。
+func TestNewRouter_ConfiguresTrustedProxies(t *testing.T) {
+	router := NewRouter(Deps{})
+
+	var observed string
+	// 临时追加回显路由（gin 允许 NewRouter 之后追加）
+	router.GET("/__test_ip", func(c *gin.Context) {
+		observed = c.ClientIP()
+		c.Status(http.StatusOK)
+	})
+
+	// 非可信来源 + 伪造 XFF
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/__test_ip", nil)
+	req.RemoteAddr = "203.0.113.9:12345"
+	req.Header.Set("X-Forwarded-For", "1.2.3.4")
+	router.ServeHTTP(rec, req)
+
+	if observed != "203.0.113.9" {
+		t.Fatalf("NewRouter 未配置可信代理：ClientIP = %q, want 203.0.113.9（伪造的 XFF 1.2.3.4 应被忽略）", observed)
+	}
+}
