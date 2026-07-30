@@ -20,7 +20,7 @@ var migrationFS embed.FS
 // dsn 为 modernc sqlite 驱动接受的连接字符串（通常是数据库文件路径）。
 // 若数据库已是最新版本，返回 nil（忽略 ErrNoChange）。
 func MigrateUp(dsn string) error {
-	db, err := sql.Open("sqlite", dsn)
+	db, err := sql.Open("sqlite", withPragmas(dsn))
 	if err != nil {
 		return fmt.Errorf("打开数据库：%w", err)
 	}

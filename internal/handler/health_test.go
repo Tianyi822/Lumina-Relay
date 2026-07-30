@@ -2,13 +2,17 @@ package handler
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
 // TestHealth 验证 GET /health 返回 200 且 body 为 {"status":"ok"}。
 // 见计划 Task 8a Step 1：路由未注册时 404 或编译失败。
 func TestHealth(t *testing.T) {
-	rec := doGET(NewRouter(Deps{}), "/health")
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	NewRouter(Deps{}).ServeHTTP(rec, req)
 
 	if rec.Code != 200 {
 		t.Fatalf("status = %d, want 200", rec.Code)

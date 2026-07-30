@@ -3,47 +3,50 @@ package auth
 import (
 	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"strings"
 )
 
-// BuildCanonical 构造写操作的待签名 canonical 串。
-// 格式固定为（字段顺序与换行分隔必须稳定，客户端与服务端需一致）：
-//
-//	method\n path\n timestamp\n nonce\n hex(sha256(body))
-//
-// 其中 body 的哈希取 sha256 并以小写 hex 编码（与 sync-design §6.4 块 hash 风格一致）。
-// timestamp/nonce 由调用方（中间件）从请求头提取，本函数不做范围校验。
+// BuildCanonical 固定设备 HTTP PoP 的跨语言文本格式。
 func BuildCanonical(method, path, timestamp, nonce string, body []byte) string {
 	sum := sha256.Sum256(body)
-	return strings.Join([]string{method, path, timestamp, nonce, hex.EncodeToString(sum[:])}, "\n")
+	return strings.Join([]string{
+		strings.ToUpper(method), path, timestamp, nonce, hex.EncodeToString(sum[:]),
+	}, "\n")
 }
 
-// VerifySignature 校验 Ed25519 签名。
-// pubKey 为设备公钥（调用方负责从存储字段解码为 ed25519.PublicKey）；
-// canonical 为 BuildCanonical 的输出；sigHex 为 X-Signature 头的 hex 编码签名。
-// 任何环节（hex 非法、长度不符、验签失败）都返回 false，绝不 panic。
-func VerifySignature(pubKey ed25519.PublicKey, canonical, sigHex string) bool {
-	sig, err := hex.DecodeString(sigHex)
-	if err != nil {
+func VerifySignature(publicKey []byte, message []byte, encodedSignature string) bool {
+	if len(publicKey) != ed25519.PublicKeySize {
 		return false
 	}
-	if len(sig) != ed25519.SignatureSize {
+	signature, err := base64.RawURLEncoding.DecodeString(encodedSignature)
+	if err != nil || len(signature) != ed25519.SignatureSize ||
+		base64.RawURLEncoding.EncodeToString(signature) != encodedSignature {
 		return false
 	}
-	return ed25519.Verify(pubKey, []byte(canonical), sig)
+	return ed25519.Verify(ed25519.PublicKey(publicKey), message, signature)
 }
 
-// DecodePublicKey 从 hex 字符串解码 Ed25519 公钥。
-// 供中间件从 devices.device_pub_key 字段解析。长度不合法时返回错误。
-func DecodePublicKey(hexKey string) (ed25519.PublicKey, error) {
-	raw, err := hex.DecodeString(hexKey)
-	if err != nil {
-		return nil, fmt.Errorf("公钥 hex 解码：%w", err)
+func DecodePublicKey(encoded string) ([]byte, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || len(raw) != ed25519.PublicKeySize ||
+		base64.RawURLEncoding.EncodeToString(raw) != encoded {
+		return nil, fmt.Errorf("Ed25519 公钥格式非法")
 	}
-	if len(raw) != ed25519.PublicKeySize {
-		return nil, fmt.Errorf("公钥长度非法：got %d bytes, want %d", len(raw), ed25519.PublicKeySize)
+	return raw, nil
+}
+
+func EncodeBase64URL(raw []byte) string {
+	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+func DecodeBase64URL(encoded string, minBytes, maxBytes int) ([]byte, error) {
+	raw, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil || len(raw) < minBytes || len(raw) > maxBytes ||
+		base64.RawURLEncoding.EncodeToString(raw) != encoded {
+		return nil, fmt.Errorf("base64url 字段格式非法")
 	}
-	return ed25519.PublicKey(raw), nil
+	return raw, nil
 }

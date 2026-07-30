@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,7 +31,7 @@ func TestRun_ShutdownOnContextCancel(t *testing.T) {
 
 	// 给服务一点时间启动。Run 内部应暴露实际监听地址；
 	// 这里通过轮询 /health 判断就绪。
-	addr := waitForListenAddr(t)
+	addr := waitForListenAddr(t, runDone)
 	url := "http://" + addr + "/health"
 	if !waitForOK(t, url, 2*time.Second) {
 		t.Fatalf("服务未在 %s 起来", addr)
@@ -50,14 +51,42 @@ func TestRun_ShutdownOnContextCancel(t *testing.T) {
 	}
 }
 
+// TestNewHTTPServerTimeouts 验证外部 HTTP server 同时限制 header、完整读取、
+// 响应写入和 keep-alive idle，不能只防 slow header。
+func TestNewHTTPServerTimeouts(t *testing.T) {
+	srv := newHTTPServer(http.NewServeMux())
+	if srv.ReadHeaderTimeout <= 0 ||
+		srv.ReadTimeout <= 0 ||
+		srv.WriteTimeout <= 0 ||
+		srv.IdleTimeout <= 0 ||
+		srv.MaxHeaderBytes != maxHeaderBytes {
+		t.Fatalf(
+			"HTTP 限制未完整配置：readHeader=%s read=%s write=%s idle=%s headers=%d",
+			srv.ReadHeaderTimeout,
+			srv.ReadTimeout,
+			srv.WriteTimeout,
+			srv.IdleTimeout,
+			srv.MaxHeaderBytes,
+		)
+	}
+}
+
 // waitForListenAddr 轮询实际监听地址。
 // 由于 Port=0 由 OS 分配，Run 必须把真实地址暴露出来（Addr()）。
-func waitForListenAddr(t *testing.T) string {
+func waitForListenAddr(t *testing.T, runDone <-chan error) string {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if a := Addr(); a != "" {
 			return a
+		}
+		select {
+		case err := <-runDone:
+			if err != nil && strings.Contains(err.Error(), "operation not permitted") {
+				t.Skipf("当前沙箱不允许 net.Listen：%v", err)
+			}
+			t.Fatalf("Run 在监听前退出：%v", err)
+		default:
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

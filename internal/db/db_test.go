@@ -47,7 +47,12 @@ func TestQueries_WithTx_RollbackOnError(t *testing.T) {
 	// 先迁移好 schema 后，accounts 表存在；事务内插入一行后返回 err，
 	// 期望回滚后 accounts 表为空。
 	triggerErr := q.WithTx(ctx, func(txq *Queries) error {
-		if _, err := txq.db.ExecContext(ctx, "INSERT INTO accounts (account_id, recovery_code_hash, dek_salt, dek_nonce, dek_ct, created_at) VALUES ('rollback', x'', x'', x'', x'', 0)"); err != nil {
+		if _, err := txq.db.ExecContext(ctx, `
+INSERT INTO accounts (
+    account_id, username, auth_salt, login_public_key, dek_envelope,
+    account_auth_public_key, quota_bytes, created_at
+) VALUES ('rollback', 'rollback', zeroblob(16), zeroblob(32), zeroblob(72),
+          zeroblob(32), 1024, 0)`); err != nil {
 			return err
 		}
 		return errSimulated
@@ -69,7 +74,12 @@ func TestQueries_WithTx_CommitsOnNil(t *testing.T) {
 	ctx := context.Background()
 
 	if err := q.WithTx(ctx, func(txq *Queries) error {
-		if _, err := txq.db.ExecContext(ctx, "INSERT INTO accounts (account_id, recovery_code_hash, dek_salt, dek_nonce, dek_ct, created_at) VALUES ('commit', x'', x'', x'', x'', 0)"); err != nil {
+		if _, err := txq.db.ExecContext(ctx, `
+INSERT INTO accounts (
+    account_id, username, auth_salt, login_public_key, dek_envelope,
+    account_auth_public_key, quota_bytes, created_at
+) VALUES ('commit', 'commit', zeroblob(16), zeroblob(32), zeroblob(72),
+          zeroblob(32), 1024, 0)`); err != nil {
 			return err
 		}
 		return nil
@@ -106,3 +116,39 @@ func (e *sentinelError) Error() string { return e.msg }
 
 // 确保 *sqlx.DB 类型在测试中被引用（编译期保证 sqlx 依赖可用）。
 var _ = (*sqlx.DB)(nil)
+
+// TestOpen_AppliesPragmas 验证 Open 后 SQLite 的 journal_mode/busy_timeout/foreign_keys
+// pragma 已按 db.go 配置生效。
+func TestOpen_AppliesPragmas(t *testing.T) {
+	dsn := filepath.Join(t.TempDir(), "test.db")
+	db, err := Open(dsn)
+	if err != nil {
+		t.Fatalf("Open 失败：%v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+
+	var mode string
+	if err := db.QueryRowxContext(ctx, "PRAGMA journal_mode").Scan(&mode); err != nil {
+		t.Fatalf("查 journal_mode 失败：%v", err)
+	}
+	if mode != "wal" {
+		t.Errorf("journal_mode = %q, want wal", mode)
+	}
+
+	var busy int
+	if err := db.QueryRowxContext(ctx, "PRAGMA busy_timeout").Scan(&busy); err != nil {
+		t.Fatalf("查 busy_timeout 失败：%v", err)
+	}
+	if busy != 5000 {
+		t.Errorf("busy_timeout = %d, want 5000", busy)
+	}
+
+	var fk int
+	if err := db.QueryRowxContext(ctx, "PRAGMA foreign_keys").Scan(&fk); err != nil {
+		t.Fatalf("查 foreign_keys 失败：%v", err)
+	}
+	if fk != 1 {
+		t.Errorf("foreign_keys = %d, want 1", fk)
+	}
+}
