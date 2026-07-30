@@ -258,7 +258,6 @@ hex(sha256(exactBodyBytes))
 | POST | `/blocks/missing` | `{"ids":["64-char-sha256",...]}` |
 | PUT | `/blocks/:blockId` | 上传原始密文 block，`blockId=hex(sha256(body))` |
 | GET | `/blocks/:blockId` | 下载当前组可见 block |
-| POST | `/blocks/prune` | `{"groupRevision":3,"keep":[...]}` |
 | POST | `/event-tickets` | 创建 30 秒单次 WebSocket ticket |
 
 `PUT /manifests/self/:baseVersion` 的同设备 CAS 冲突返回：
@@ -272,7 +271,7 @@ hex(sha256(exactBodyBytes))
 }
 ```
 
-组合并后，旧 revision 的 prune 或 discard 返回 `409 group_changed`。所有 JSON 字段必须严格匹配定义，不接受未知字段、重复字段或 query 参数。
+组合并后，旧 revision 的 discard 返回 `409 group_changed`。所有 JSON 字段必须严格匹配定义，不接受未知字段、重复字段或 query 参数。
 
 ## 7. 同步组
 
@@ -344,11 +343,10 @@ Manifest 明文由客户端加密前组织，最低契约为：
 - `/blocks/missing` 每次最多 1000 个 ID；
 - 时间字段 `createdAt`/`lastSeenAt`/`expiresAt` 使用 Unix 秒，`serverTimeMs`/`X-Timestamp` 使用 Unix 毫秒。
 
-组内客户端完成 Manifest 合并后，可以用当前 `groupRevision` 调用 `/blocks/prune` 并提交仍被所有最新 heads 引用的 blockId。若组合并发生，服务端返回 `409 group_changed`，客户端必须重新计算 keep 集合。
-
-prune 或显式放弃会立即释放账号配额，但物理孤儿块还会保留 discovery
-中 `blockGcGraceSeconds` 指定的安全宽限期（当前为 24 小时）。宽限期内同一
-SHA-256 块重新上传会恢复关联；后台 GC 只删除无账号引用且无上传预留的块。
+当前不公开通用块 prune 端点，避免在另一设备“已上传 block、尚未提交引用它的
+Manifest”窗口内误删关联。用户显式放弃其他同步组时会释放被放弃组的账号配额；
+由此产生的物理孤儿块仍保留 discovery 中 `blockGcGraceSeconds` 指定的安全宽限期
+（当前为 24 小时）。后台 GC 只删除无账号引用且无上传预留的块。
 
 ## 10. 无恢复语义
 

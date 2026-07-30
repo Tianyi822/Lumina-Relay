@@ -50,7 +50,7 @@ go run ./cmd/loadtest -target http://localhost:8443 -endpoint discovery
 
 ### 文件按功能拆分（非旧的单文件大包）
 `feat/client-sync-api-alignment` 把 handler/service/auth 按功能拆细了，改代码前先认路径：
-- **handler**（`internal/handler/`）：`connection.go`（`/connections/*`、`/session-challenges`、`/sessions`）、`discovery.go`、`manifests.go`、`blocks.go`（`blocks.go` 已含 prune/missing）、`sync.go`（sync-codes、sync-groups/discard-others、devices 列表/吊销）、`events.go`（`/event-tickets` + `/events` WebSocket）、`health.go`、`http.go`（共享写响应 helper）、`router.go`（唯一挂路由处）。
+- **handler**（`internal/handler/`）：`connection.go`（`/connections/*`、`/session-challenges`、`/sessions`）、`discovery.go`、`manifests.go`、`blocks.go`（missing/上传/下载；prune 仅保留内部回收逻辑，未挂路由）、`sync.go`（sync-codes、sync-groups/discard-others、devices 列表/吊销）、`events.go`（`/event-tickets` + `/events` WebSocket）、`health.go`、`http.go`（共享写响应 helper）、`router.go`（唯一挂路由处）。
 - **service**（`internal/service/`）：`connection.go`/`sync.go`/`manifest.go`/`blocks.go`/`events.go` 一一对应；旧的 `account.go`/`device.go` 已删，其职责并入 `connection.go`+`sync.go`。
 - **auth**（`internal/auth/`）：`signature.go`（Ed25519 验签 + `BuildCanonical`）、`transcript.go`（`BuildTranscript` 及各生命周期 transcript）、`challenge.go`（一次性 challenge store，失败也消费防在线猜测）、`secret.go`（JWT 密钥 load-or-generate）、`jwt.go`（HS256 session token 签发/解析）。
 - **db**（`internal/db/`）：`queries.go`（所有手写 SQL）、`relay_meta.go`（**Relay instanceId 单例持久化**，`GetOrCreateInstanceID`：32 字节随机 + base64url，`INSERT OR IGNORE` 收敛并发首调）、`db.go`（Open + pragma）、`migrate.go`（golang-migrate）。
@@ -60,7 +60,7 @@ go run ./cmd/loadtest -target http://localhost:8443 -endpoint discovery
 | 层级 | 端点 | 中间件 |
 |---|---|---|
 | 无认证 | discovery、connection/session challenge、health | `LimitByClientIP`（HashedLimiter）+ body limit |
-| 账户数据 | bootstrap、sync-codes、devices、manifests、blocks、prune、sync-groups、event-tickets | `RequireSession` + body limit + `RequireDeviceProof` |
+| 账户数据 | bootstrap、sync-codes、devices、manifests、blocks、sync-groups、event-tickets | `RequireSession` + body limit + `RequireDeviceProof` |
 | WebSocket | `/events` | 30 秒单次 event ticket（`Sec-WebSocket-Protocol: lumina-events, ticket.<t>`） |
 
 - `RequireSession` 严格解析绑定 instance/device 的 HS256 JWT，查设备记录，拒绝已吊销设备，并把 `accountId/deviceId/devicePublicKey/syncGroupId` 注入 context。
