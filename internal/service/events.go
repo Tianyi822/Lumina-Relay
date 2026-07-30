@@ -11,6 +11,7 @@ import (
 type Event struct {
 	Type          string `json:"type"`
 	DeviceID      string `json:"deviceId,omitempty"`
+	SessionID     string `json:"sessionId,omitempty"`
 	Version       int64  `json:"version,omitempty"`
 	GroupRevision int64  `json:"groupRevision,omitempty"`
 	ServerTimeMS  int64  `json:"serverTimeMs"`

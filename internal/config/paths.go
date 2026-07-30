@@ -60,3 +60,12 @@ func DefaultBlocksDir() (string, error) {
 	}
 	return filepath.Join(dir, "blocks"), nil
 }
+
+// DefaultSessionsDir 返回默认会话 JSONL 文件存储目录（~/.lumina-relay/sessions）。
+func DefaultSessionsDir() (string, error) {
+	dir, err := DataDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "sessions"), nil
+}

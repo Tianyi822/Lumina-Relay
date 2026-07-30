@@ -12,19 +12,20 @@ import (
 )
 
 type Deps struct {
-	ConnectionService *service.ConnectionService
-	SyncService       *service.SyncService
-	ManifestService   *service.ManifestService
-	BlocksService     *service.BlocksService
-	EventHub          *service.EventHub
-	EventTickets      *service.EventTicketStore
-	Queries           *db.Queries
-	JWTSecret         []byte
-	InstanceID        string
-	ConnectionLimiter *middleware.HashedLimiter
-	UsernameLimiter   *middleware.HashedLimiter
-	SessionLimiter    *middleware.HashedLimiter
-	SyncCodeLimiter   *middleware.HashedLimiter
+	ConnectionService  *service.ConnectionService
+	SyncService        *service.SyncService
+	ManifestService    *service.ManifestService
+	BlocksService      *service.BlocksService
+	SessionFileService *service.SessionFileService
+	EventHub           *service.EventHub
+	EventTickets       *service.EventTicketStore
+	Queries            *db.Queries
+	JWTSecret          []byte
+	InstanceID         string
+	ConnectionLimiter  *middleware.HashedLimiter
+	UsernameLimiter    *middleware.HashedLimiter
+	SessionLimiter     *middleware.HashedLimiter
+	SyncCodeLimiter    *middleware.HashedLimiter
 }
 
 func NewRouter(deps Deps) *gin.Engine {
@@ -105,8 +106,21 @@ func NewRouter(deps Deps) *gin.Engine {
 		session, middleware.BodyLimitBlock(), proof, PutBlock(deps))
 	router.GET("/blocks/:blockId",
 		session, middleware.BodyLimitJSON(), proof, GetBlock(deps))
-	router.POST("/blocks/prune",
-		session, middleware.BodyLimitJSON(), proof, PruneBlocks(deps))
+
+	router.GET("/session-files",
+		session, middleware.BodyLimitJSON(), proof, ListSessionFiles(deps))
+	router.GET("/session-files/:sessionId",
+		session, middleware.BodyLimitJSON(), proof, GetSessionFile(deps))
+	router.PUT("/session-files/:sessionId/:baseVersion",
+		session, middleware.BodyLimitSessionFile(), proof, PutSessionFile(deps))
+	router.POST("/session-files/:sessionId/append/:baseVersion",
+		session, middleware.BodyLimitSessionFile(), proof, AppendSessionFile(deps))
+	router.DELETE("/session-files/:sessionId",
+		session, middleware.BodyLimitJSON(), proof, DeleteSessionFile(deps))
+	router.GET("/session-files-index",
+		session, middleware.BodyLimitJSON(), proof, GetSessionIndex(deps))
+	router.PUT("/session-files-index/:baseVersion",
+		session, middleware.BodyLimitSessionFile(), proof, PutSessionIndex(deps))
 
 	router.POST("/event-tickets",
 		session, middleware.BodyLimitJSON(), proof, CreateEventTicket(deps))

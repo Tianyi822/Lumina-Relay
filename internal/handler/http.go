@@ -142,6 +142,10 @@ func writeServiceError(c *gin.Context, err error) {
 		writeAPIError(c, apperr.New(apperr.CodeStaleManifest, "Manifest 基础版本已过期"))
 	case errors.Is(err, service.ErrManifestNotFound):
 		writeAPIError(c, apperr.New(apperr.CodeManifestNotFound, "Manifest 不存在"))
+	case errors.Is(err, service.ErrSessionFileNotFound):
+		writeAPIError(c, apperr.New(apperr.CodeSessionFileNotFound, "会话文件不存在"))
+	case errors.Is(err, service.ErrInvalidSessionID):
+		writeAPIError(c, apperr.New(apperr.CodeInvalidSessionID, "会话 ID 格式无效"))
 	case errors.Is(err, service.ErrBlockHashMismatch):
 		writeAPIError(c, apperr.New(apperr.CodeBlockHashMismatch, "块 SHA-256 不匹配"))
 	case errors.Is(err, service.ErrBlockNotFound):

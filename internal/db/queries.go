@@ -253,11 +253,11 @@ WHERE device_id = ? AND account_id = ? AND sync_group_id = ? AND status = 'activ
 }
 
 type DeviceListRow struct {
-	DeviceID   string
-	DeviceName string
-	CreatedAt  int64
-	LastSeenAt int64
-	Status     string
+	DeviceID   string `json:"deviceId"`
+	DeviceName string `json:"deviceName"`
+	CreatedAt  int64  `json:"createdAt"`
+	LastSeenAt int64  `json:"lastSeenAt"`
+	Status     string `json:"status"`
 }
 
 func (q *Queries) ListDevicesInGroup(ctx context.Context, accountID, groupID string) ([]DeviceListRow, error) {
@@ -344,9 +344,9 @@ SELECT EXISTS (
 }
 
 type ManifestHeadRow struct {
-	DeviceID       string
-	CurrentVersion int64
-	UpdatedAt      int64
+	DeviceID       string `json:"deviceId"`
+	CurrentVersion int64  `json:"currentVersion"`
+	UpdatedAt      int64  `json:"updatedAt"`
 }
 
 func (q *Queries) ListManifestHeads(ctx context.Context, accountID, groupID string) ([]ManifestHeadRow, error) {
@@ -1041,8 +1041,11 @@ WHERE block_id = ? AND device_id IN (
 
 type DiscardGroupsResult struct {
 	RevokedDeviceIDs []string
-	OrphanBlockIDs   []string
-	ReclaimedBytes   int64
+	// DiscardedGroupIDs 是被丢弃的同步组 ID（供调用方 best-effort 清理
+	// 对应的会话文件目录；注册表行由 sync_groups 外键级联删除）。
+	DiscardedGroupIDs []string
+	OrphanBlockIDs    []string
+	ReclaimedBytes    int64
 }
 
 func (q *Queries) DiscardOtherGroups(
@@ -1084,6 +1087,24 @@ WHERE account_id = ? AND sync_group_id IS NOT NULL AND sync_group_id <> ?`,
 		}
 		if len(out.RevokedDeviceIDs) == 0 {
 			return nil
+		}
+
+		groupRows, err := txq.db.QueryxContext(ctx, `
+SELECT group_id FROM sync_groups
+WHERE account_id = ? AND group_id <> ?`, accountID, currentGroupID)
+		if err != nil {
+			return err
+		}
+		for groupRows.Next() {
+			var id string
+			if err := groupRows.Scan(&id); err != nil {
+				groupRows.Close()
+				return err
+			}
+			out.DiscardedGroupIDs = append(out.DiscardedGroupIDs, id)
+		}
+		if err := groupRows.Close(); err != nil {
+			return err
 		}
 
 		blockRows, err := txq.db.QueryxContext(ctx, `
@@ -1152,6 +1173,7 @@ DELETE FROM sync_groups WHERE account_id = ? AND group_id <> ?`,
 		return nil
 	})
 	sort.Strings(out.RevokedDeviceIDs)
+	sort.Strings(out.DiscardedGroupIDs)
 	sort.Strings(out.OrphanBlockIDs)
 	return out, err
 }
@@ -1332,6 +1354,8 @@ const (
 	TableSyncCodes          TableName = "sync_codes"
 	TableRequestNonces      TableName = "request_nonces"
 	TableUploadReservations TableName = "upload_reservations"
+	TableSessionFiles       TableName = "session_files"
+	TableSessionIndexes     TableName = "session_indexes"
 )
 
 var tableWhitelist = map[TableName]struct{}{
@@ -1339,6 +1363,7 @@ var tableWhitelist = map[TableName]struct{}{
 	TableManifests: {}, TableManifestHeads: {}, TableBlockObjects: {},
 	TableAccountBlocks: {}, TableDeviceBlocks: {}, TableSyncCodes: {},
 	TableRequestNonces: {}, TableUploadReservations: {},
+	TableSessionFiles: {}, TableSessionIndexes: {},
 }
 
 func (q *Queries) CountRows(ctx context.Context, dest *int, table TableName) error {

@@ -48,6 +48,14 @@ func BodyLimitManifest() gin.HandlerFunc {
 	}
 }
 
+// BodyLimitSessionFile 限制原始会话 JSONL 文件（含 index.json）请求体。
+// 与 Manifest 同为 4 MiB 上限。
+func BodyLimitSessionFile() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		limitBody(c, maxManifestBody)
+	}
+}
+
 // limitBody 用 http.MaxBytesReader 包裹请求体。
 //
 // 两道防线：

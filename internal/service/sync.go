@@ -110,8 +110,9 @@ func (s *SyncService) RedeemCode(
 }
 
 type DiscardResult struct {
-	RevokedDeviceIDs []string
-	ReclaimedBytes   int64
+	RevokedDeviceIDs  []string
+	DiscardedGroupIDs []string
+	ReclaimedBytes    int64
 }
 
 func (s *SyncService) DiscardOtherGroups(
@@ -143,8 +144,9 @@ func (s *SyncService) DiscardOtherGroups(
 		return DiscardResult{}, err
 	}
 	return DiscardResult{
-		RevokedDeviceIDs: result.RevokedDeviceIDs,
-		ReclaimedBytes:   result.ReclaimedBytes,
+		RevokedDeviceIDs:  result.RevokedDeviceIDs,
+		DiscardedGroupIDs: result.DiscardedGroupIDs,
+		ReclaimedBytes:    result.ReclaimedBytes,
 	}, nil
 }
 

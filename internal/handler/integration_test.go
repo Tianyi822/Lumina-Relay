@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -67,15 +68,17 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	}
 	jwtSecret := bytes.Repeat([]byte{8}, 32)
 	blockStore := store.NewBlockStore(filepath.Join(root, "blocks"))
+	sessionStore := store.NewSessionStore(filepath.Join(root, "sessions"))
 	hub := service.NewEventHub()
 	tickets := service.NewEventTicketStore()
 	deps := Deps{
 		ConnectionService: service.NewConnectionService(
 			q, auth.NewChallengeStore(100), instanceID, jwtSecret, 16),
-		SyncService:     service.NewSyncService(q, instanceID, jwtSecret),
-		ManifestService: service.NewManifestService(q),
-		BlocksService:   service.NewBlocksService(q, blockStore),
-		EventHub:        hub, EventTickets: tickets, Queries: q,
+		SyncService:        service.NewSyncService(q, instanceID, jwtSecret),
+		ManifestService:    service.NewManifestService(q),
+		BlocksService:      service.NewBlocksService(q, blockStore),
+		SessionFileService: service.NewSessionFileService(q, sessionStore),
+		EventHub:           hub, EventTickets: tickets, Queries: q,
 		JWTSecret: jwtSecret, InstanceID: instanceID,
 	}
 	loginPublic, loginPrivate, _ := ed25519.GenerateKey(rand.Reader)
@@ -272,13 +275,6 @@ func TestABCTransitiveSyncAndBlockIsolation(t *testing.T) {
 	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), manifestA) {
 		t.Fatalf("合并后 B manifest=%d body=%q", rec.Code, rec.Body.Bytes())
 	}
-	stalePrune, _ := json.Marshal(map[string]any{
-		"groupRevision": b.groupRevision, "keep": []string{blockID},
-	})
-	rec = env.signed(t, b, http.MethodPost, "/blocks/prune", stalePrune)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("旧 groupRevision prune=%d %s", rec.Code, rec.Body.String())
-	}
 
 	c, _ := env.login(t, "Device C")
 	rec = env.signed(t, b, http.MethodPost, "/sync-codes", nil)
@@ -302,6 +298,72 @@ func TestABCTransitiveSyncAndBlockIsolation(t *testing.T) {
 	}
 	if len(heads.Heads) != 3 {
 		t.Fatalf("C 加入后 heads=%d want=3", len(heads.Heads))
+	}
+}
+
+func TestListDevicesUsesCamelCaseWireFields(t *testing.T) {
+	env := newIntegrationEnv(t)
+	defer env.cleanup()
+	profile := env.registerA(t)
+
+	rec := env.signed(t, profile, http.MethodGet, "/devices", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("devices=%d %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Devices []map[string]json.RawMessage `json:"devices"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Devices) != 1 {
+		t.Fatalf("devices=%d want=1", len(response.Devices))
+	}
+	const want = "createdAt,deviceId,deviceName,lastSeenAt,status"
+	if got := sortedJSONKeys(response.Devices[0]); got != want {
+		t.Fatalf("device keys=%q want=%q body=%s", got, want, rec.Body.String())
+	}
+}
+
+func TestListManifestHeadsUsesCamelCaseWireFields(t *testing.T) {
+	env := newIntegrationEnv(t)
+	defer env.cleanup()
+	profile := env.registerA(t)
+
+	rec := env.signed(t, profile, http.MethodGet, "/manifests", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("manifests=%d %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		Heads []map[string]json.RawMessage `json:"heads"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Heads) != 1 {
+		t.Fatalf("heads=%d want=1", len(response.Heads))
+	}
+	const want = "currentVersion,deviceId,updatedAt"
+	if got := sortedJSONKeys(response.Heads[0]); got != want {
+		t.Fatalf("head keys=%q want=%q body=%s", got, want, rec.Body.String())
+	}
+}
+
+func TestUnsafePruneRouteIsNotExposed(t *testing.T) {
+	env := newIntegrationEnv(t)
+	defer env.cleanup()
+	profile := env.registerA(t)
+	body, err := json.Marshal(map[string]any{
+		"groupRevision": profile.groupRevision,
+		"keep":          []string{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := env.signed(t, profile, http.MethodPost, "/blocks/prune", body)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("prune=%d want=404 body=%s", rec.Code, rec.Body.String())
 	}
 }
 
@@ -543,8 +605,136 @@ func TestWebSocketTicketIsSingleUseAndReceivesManifestEvent(t *testing.T) {
 	}
 }
 
+func TestSessionFileFullLifecycle(t *testing.T) {
+	env := newIntegrationEnv(t)
+	defer env.cleanup()
+	a := env.registerA(t)
+	sid := "session-1753857600000-a1b2c3"
+	base := "/session-files/" + sid
+
+	// 创建（baseVersion=0）
+	meta := []byte("{\"kind\":\"meta\",\"v\":1}\n")
+	rec := env.signed(t, a, http.MethodPut, base+"/0", meta)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("创建=%d %s", rec.Code, rec.Body.String())
+	}
+	var putResult struct {
+		Version int64 `json:"version"`
+		Size    int64 `json:"size"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &putResult); err != nil {
+		t.Fatal(err)
+	}
+	if putResult.Version != 1 || putResult.Size != int64(len(meta)) {
+		t.Fatalf("创建结果=%+v", putResult)
+	}
+
+	// 追加（baseVersion=1）
+	msg := []byte("{\"kind\":\"message\"}\n")
+	rec = env.signed(t, a, http.MethodPost, base+"/append/1", msg)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("追加=%d %s", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &putResult); err != nil {
+		t.Fatal(err)
+	}
+	if putResult.Version != 2 {
+		t.Fatalf("追加后版本=%d want=2", putResult.Version)
+	}
+
+	// 读回字节一致
+	rec = env.signed(t, a, http.MethodGet, base, nil)
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), append(append([]byte{}, meta...), msg...)) {
+		t.Fatalf("读回=%d body=%q", rec.Code, rec.Body.Bytes())
+	}
+	if version := rec.Header().Get("X-Session-File-Version"); version != "2" {
+		t.Fatalf("版本头=%q want=2", version)
+	}
+
+	// 版本冲突：用过期 baseVersion=0 重写 → 409
+	rec = env.signed(t, a, http.MethodPut, base+"/0", []byte("stale"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("冲突重写=%d %s", rec.Code, rec.Body.String())
+	}
+	var conflict struct {
+		Error struct {
+			Code           string `json:"code"`
+			CurrentVersion int64  `json:"currentVersion"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &conflict); err != nil {
+		t.Fatal(err)
+	}
+	if conflict.Error.Code != "stale_session_file" || conflict.Error.CurrentVersion != 2 {
+		t.Fatalf("冲突响应=%+v", conflict.Error)
+	}
+
+	// 列表
+	rec = env.signed(t, a, http.MethodGet, "/session-files", nil)
+	var listResult struct {
+		Sessions []struct {
+			SessionID string `json:"sessionId"`
+			Version   int64  `json:"version"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &listResult); err != nil {
+		t.Fatal(err)
+	}
+	if len(listResult.Sessions) != 1 || listResult.Sessions[0].SessionID != sid {
+		t.Fatalf("列表=%+v", listResult.Sessions)
+	}
+
+	// index.json 上传读回
+	indexBody := []byte("{\"schemaVersion\":1,\"sessions\":[]}")
+	rec = env.signed(t, a, http.MethodPut, "/session-files-index/0", indexBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("上传 index=%d %s", rec.Code, rec.Body.String())
+	}
+	rec = env.signed(t, a, http.MethodGet, "/session-files-index", nil)
+	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), indexBody) {
+		t.Fatalf("读回 index=%d body=%q", rec.Code, rec.Body.Bytes())
+	}
+
+	// 删除
+	rec = env.signed(t, a, http.MethodDelete, base, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("删除=%d %s", rec.Code, rec.Body.String())
+	}
+	rec = env.signed(t, a, http.MethodGet, base, nil)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("删除后读取=%d want=404", rec.Code)
+	}
+
+	// 非法 sessionId → 400
+	rec = env.signed(t, a, http.MethodPut, "/session-files/BAD_ID/0", []byte("x"))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("非法 sessionId=%d want=400 %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestSessionFileBodyLimitReturns413(t *testing.T) {
+	env := newIntegrationEnv(t)
+	defer env.cleanup()
+	a := env.registerA(t)
+	oversize := bytes.Repeat([]byte("x"), (4<<20)+1)
+	rec := env.signed(t, a, http.MethodPut,
+		"/session-files/session-1-a1b2c3/0", oversize)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("超限=%d want=413 %s", rec.Code, rec.Body.String())
+	}
+}
+
 func signed(privateKey ed25519.PrivateKey, message []byte) string {
 	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, message))
+}
+
+func sortedJSONKeys(value map[string]json.RawMessage) string {
+	keys := make([]string, 0, len(value))
+	for key := range value {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, ",")
 }
 
 func mustDecodeBase64URL(t *testing.T, value string) []byte {
