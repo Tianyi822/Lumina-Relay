@@ -767,6 +767,130 @@ func TestSessionFileBodyLimitReturns413(t *testing.T) {
 	}
 }
 
+func TestSessionFilesSurviveSyncGroupMerge(t *testing.T) {
+	env := newIntegrationEnv(t)
+	defer env.cleanup()
+	a := env.registerA(t)
+
+	if rec := env.signed(
+		t, a, http.MethodPut, "/session-files/session-1-a/0", []byte("A"),
+	); rec.Code != http.StatusOK {
+		t.Fatalf("A 上传=%d %s", rec.Code, rec.Body.String())
+	}
+	b, bLogin := env.login(t, "Device B")
+	if !bLogin.Bootstrap.HasOtherSyncData {
+		t.Fatal("仅有 session 数据时 B 应获知存在其他同步数据")
+	}
+	if rec := env.signed(
+		t, b, http.MethodPut, "/session-files/session-2-b/0", []byte("B"),
+	); rec.Code != http.StatusOK {
+		t.Fatalf("B 上传=%d %s", rec.Code, rec.Body.String())
+	}
+
+	rec := env.signed(t, a, http.MethodPost, "/sync-codes", nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("生成同步码=%d %s", rec.Code, rec.Body.String())
+	}
+	var codeResponse struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &codeResponse); err != nil {
+		t.Fatal(err)
+	}
+	redeemBody, err := json.Marshal(map[string]string{"code": codeResponse.Code})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = env.signed(t, b, http.MethodPost, "/sync-codes/redeem", redeemBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("兑换同步码=%d %s", rec.Code, rec.Body.String())
+	}
+
+	rec = env.signed(t, b, http.MethodGet, "/session-files", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("合并后列表=%d %s", rec.Code, rec.Body.String())
+	}
+	var list struct {
+		Sessions []struct {
+			SessionID string `json:"sessionId"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, item := range list.Sessions {
+		ids = append(ids, item.SessionID)
+	}
+	sort.Strings(ids)
+	if strings.Join(ids, ",") != "session-1-a,session-2-b" {
+		t.Fatalf("合并后 session IDs=%v", ids)
+	}
+	for path, want := range map[string]string{
+		"/session-files/session-1-a": "A",
+		"/session-files/session-2-b": "B",
+	} {
+		rec = env.signed(t, b, http.MethodGet, path, nil)
+		if rec.Code != http.StatusOK || rec.Body.String() != want {
+			t.Fatalf("GET %s status=%d body=%q", path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
+func TestDiscardOtherGroupsReclaimsSessionQuota(t *testing.T) {
+	env := newIntegrationEnv(t)
+	defer env.cleanup()
+	a := env.registerA(t)
+	if rec := env.signed(
+		t, a, http.MethodPut, "/session-files/session-1-a/0", []byte("1234"),
+	); rec.Code != http.StatusOK {
+		t.Fatalf("旧组上传=%d %s", rec.Code, rec.Body.String())
+	}
+	b, _ := env.login(t, "Device B")
+	if rec := env.signed(
+		t, b, http.MethodPut, "/session-files/session-2-b/0", []byte("123456"),
+	); rec.Code != http.StatusOK {
+		t.Fatalf("当前组上传=%d %s", rec.Code, rec.Body.String())
+	}
+
+	deviceB, err := env.q.GetDevice(t.Context(), b.deviceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transcript, err := auth.BuildDiscardGroupsTranscript(
+		env.instanceID, env.accountID, b.deviceID,
+		deviceB.SyncGroupID.String, b.groupRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{
+		"groupRevision": b.groupRevision,
+		"accountProof":  signed(env.accountPrivate, transcript),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := env.signed(
+		t, b, http.MethodPost, "/sync-groups/discard-others", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("discard=%d %s", rec.Code, rec.Body.String())
+	}
+	var response struct {
+		DiscardedDevices int   `json:"discardedDevices"`
+		ReclaimedBytes   int64 `json:"reclaimedBytes"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.DiscardedDevices != 1 || response.ReclaimedBytes != 4 {
+		t.Fatalf("discard 响应=%+v", response)
+	}
+	account, err := env.q.GetAccount(t.Context(), env.accountID)
+	if err != nil || account.UsedBytes != 6 {
+		t.Fatalf("discard 后账号=%+v err=%v", account, err)
+	}
+}
+
 func signed(privateKey ed25519.PrivateKey, message []byte) string {
 	return base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, message))
 }

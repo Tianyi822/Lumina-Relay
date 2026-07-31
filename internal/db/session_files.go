@@ -116,8 +116,10 @@ func (q *Queries) PutSessionFileCAS(
 			return err
 		}
 		// 与块上传共用同一口径：先回收过期 reservation 再统计配额。
-		_, _ = txq.db.ExecContext(ctx,
-			`DELETE FROM upload_reservations WHERE expires_at <= ?`, now)
+		if _, err := txq.db.ExecContext(ctx,
+			`DELETE FROM upload_reservations WHERE expires_at <= ?`, now); err != nil {
+			return fmt.Errorf("清理过期上传 reservation：%w", err)
+		}
 
 		// 按账号级主键查询：其他组占用同 ID 是业务错误而非 CAS 冲突。
 		var currentGroupID string

@@ -336,8 +336,13 @@ SELECT EXISTS (
     JOIN device_blocks b ON b.device_id = d.device_id
     WHERE d.account_id = ? AND d.sync_group_id IS NOT NULL
       AND d.sync_group_id <> ?
+    UNION ALL
+    SELECT 1
+    FROM session_files s
+    WHERE s.account_id = ? AND s.sync_group_id <> ?
     LIMIT 1
-)`, accountID, currentGroupID, accountID, currentGroupID).Scan(&exists)
+)`, accountID, currentGroupID, accountID, currentGroupID,
+		accountID, currentGroupID).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("检查其他同步数据：%w", err)
 	}
@@ -624,6 +629,15 @@ WHERE sync_group_id = ? AND consumed_at IS NULL`,
 			`UPDATE sync_codes SET consumed_at = ? WHERE code_id = ? AND consumed_at IS NULL`,
 			now, code.CodeID); err != nil {
 			return fmt.Errorf("消费邀请码：%w", err)
+		}
+		// 先把 loser 组的会话快照迁入 winner 组，再删除 loser 组，
+		// 避免外键级联误删已提交的密文（sessionId 账号内唯一，不会冲突）。
+		if _, err := txq.db.ExecContext(ctx, `
+UPDATE session_files
+SET sync_group_id = ?
+WHERE account_id = ? AND sync_group_id = ?`,
+			winner.GroupID, accountID, loser.GroupID); err != nil {
+			return fmt.Errorf("迁移会话文件：%w", err)
 		}
 		if _, err := txq.db.ExecContext(ctx,
 			`DELETE FROM sync_groups WHERE group_id = ?`, loser.GroupID); err != nil {
@@ -1042,11 +1056,8 @@ WHERE block_id = ? AND device_id IN (
 
 type DiscardGroupsResult struct {
 	RevokedDeviceIDs []string
-	// DiscardedGroupIDs 是被丢弃的同步组 ID（供调用方 best-effort 清理
-	// 对应的会话文件目录；注册表行由 sync_groups 外键级联删除）。
-	DiscardedGroupIDs []string
-	OrphanBlockIDs    []string
-	ReclaimedBytes    int64
+	OrphanBlockIDs   []string
+	ReclaimedBytes   int64
 }
 
 func (q *Queries) DiscardOtherGroups(
@@ -1090,24 +1101,6 @@ WHERE account_id = ? AND sync_group_id IS NOT NULL AND sync_group_id <> ?`,
 			return nil
 		}
 
-		groupRows, err := txq.db.QueryxContext(ctx, `
-SELECT group_id FROM sync_groups
-WHERE account_id = ? AND group_id <> ?`, accountID, currentGroupID)
-		if err != nil {
-			return err
-		}
-		for groupRows.Next() {
-			var id string
-			if err := groupRows.Scan(&id); err != nil {
-				groupRows.Close()
-				return err
-			}
-			out.DiscardedGroupIDs = append(out.DiscardedGroupIDs, id)
-		}
-		if err := groupRows.Close(); err != nil {
-			return err
-		}
-
 		blockRows, err := txq.db.QueryxContext(ctx, `
 SELECT DISTINCT b.block_id
 FROM device_blocks b
@@ -1127,6 +1120,16 @@ WHERE d.account_id = ? AND d.sync_group_id <> ?`, accountID, currentGroupID)
 		}
 		if err := blockRows.Close(); err != nil {
 			return err
+		}
+
+		// 先统计被丢弃组的会话字节；行本身由 sync_groups 外键级联删除。
+		var sessionBytes int64
+		if err := txq.db.QueryRowxContext(ctx, `
+SELECT COALESCE(SUM(size), 0)
+FROM session_files
+WHERE account_id = ? AND sync_group_id <> ?`,
+			accountID, currentGroupID).Scan(&sessionBytes); err != nil {
+			return fmt.Errorf("统计被丢弃会话字节：%w", err)
 		}
 
 		if _, err := txq.db.ExecContext(ctx, `
@@ -1162,6 +1165,16 @@ DELETE FROM sync_groups WHERE account_id = ? AND group_id <> ?`,
 			accountID, currentGroupID); err != nil {
 			return err
 		}
+		// 级联删除完成后在同一事务内释放会话配额。
+		if sessionBytes > 0 {
+			if _, err := txq.db.ExecContext(ctx, `
+UPDATE accounts
+SET used_bytes = used_bytes - ?
+WHERE account_id = ?`, sessionBytes, accountID); err != nil {
+				return fmt.Errorf("释放会话配额：%w", err)
+			}
+			out.ReclaimedBytes += sessionBytes
+		}
 		var released PruneResult
 		for _, id := range blockIDs {
 			if err := txq.releaseUnreferencedAccountBlock(
@@ -1174,7 +1187,6 @@ DELETE FROM sync_groups WHERE account_id = ? AND group_id <> ?`,
 		return nil
 	})
 	sort.Strings(out.RevokedDeviceIDs)
-	sort.Strings(out.DiscardedGroupIDs)
 	sort.Strings(out.OrphanBlockIDs)
 	return out, err
 }

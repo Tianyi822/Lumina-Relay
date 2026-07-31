@@ -226,8 +226,9 @@ func TestDiscardOtherGroupsCascadesSessionFiles(t *testing.T) {
 	if err != nil {
 		t.Fatalf("discard err=%v", err)
 	}
-	if len(result.DiscardedGroupIDs) != 1 || result.DiscardedGroupIDs[0] != "group-a" {
-		t.Fatalf("DiscardedGroupIDs=%v want [group-a]", result.DiscardedGroupIDs)
+	// 被丢弃组的字节计入 ReclaimedBytes（cipher-a 共 8 字节）
+	if result.ReclaimedBytes != 8 {
+		t.Fatalf("ReclaimedBytes=%d want=8", result.ReclaimedBytes)
 	}
 	// group-a 的快照行被级联删除
 	if _, err := q.GetSessionFile(ctx, "account", "group-a", "session-1-a"); !errors.Is(err, sql.ErrNoRows) {
@@ -236,5 +237,48 @@ func TestDiscardOtherGroupsCascadesSessionFiles(t *testing.T) {
 	// 当前组不受影响
 	if _, err := q.GetSessionFile(ctx, "account", "group-b", "session-2-b"); err != nil {
 		t.Fatalf("当前组会话文件 err=%v", err)
+	}
+}
+
+func TestDiscardOtherGroupsReclaimsSessionQuota(t *testing.T) {
+	q, cleanup := openTestQueries(t)
+	defer cleanup()
+	seedAccountAndDevice(t, q, "account", "alice", "A", "group-a", 1)
+	seedAccountAndDevice(t, q, "account", "alice", "B", "group-b", 2)
+	ctx := context.Background()
+
+	if _, err := q.PutSessionFileCAS(
+		ctx, "account", "group-a", "A", "session-1-a", 0, []byte("1234"), 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.PutSessionFileCAS(
+		ctx, "account", "group-b", "B", "session-2-b", 0, []byte("123456"), 4); err != nil {
+		t.Fatal(err)
+	}
+	result, err := q.DiscardOtherGroups(
+		ctx, "account", "B", "group-b", 1, 5)
+	if err != nil || result.ReclaimedBytes != 4 {
+		t.Fatalf("discard=%+v err=%v", result, err)
+	}
+	account, err := q.GetAccount(ctx, "account")
+	if err != nil || account.UsedBytes != 6 {
+		t.Fatalf("保留组配额=%+v err=%v", account, err)
+	}
+}
+
+func TestHasOtherSyncDataIncludesSessionOnlyGroup(t *testing.T) {
+	q, cleanup := openTestQueries(t)
+	defer cleanup()
+	seedAccountAndDevice(t, q, "account", "alice", "A", "group-a", 1)
+	seedAccountAndDevice(t, q, "account", "alice", "B", "group-b", 2)
+	ctx := context.Background()
+
+	if _, err := q.PutSessionFileCAS(
+		ctx, "account", "group-a", "A", "session-1-a", 0, []byte("x"), 3); err != nil {
+		t.Fatal(err)
+	}
+	hasOther, err := q.HasOtherSyncData(ctx, "account", "group-b")
+	if err != nil || !hasOther {
+		t.Fatalf("hasOther=%v err=%v", hasOther, err)
 	}
 }
