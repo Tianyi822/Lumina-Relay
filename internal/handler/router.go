@@ -113,14 +113,8 @@ func NewRouter(deps Deps) *gin.Engine {
 		session, middleware.BodyLimitJSON(), proof, GetSessionFile(deps))
 	router.PUT("/session-files/:sessionId/:baseVersion",
 		session, middleware.BodyLimitSessionFile(), proof, PutSessionFile(deps))
-	router.POST("/session-files/:sessionId/append/:baseVersion",
-		session, middleware.BodyLimitSessionFile(), proof, AppendSessionFile(deps))
-	router.DELETE("/session-files/:sessionId",
+	router.DELETE("/session-files/:sessionId/:baseVersion",
 		session, middleware.BodyLimitJSON(), proof, DeleteSessionFile(deps))
-	router.GET("/session-files-index",
-		session, middleware.BodyLimitJSON(), proof, GetSessionIndex(deps))
-	router.PUT("/session-files-index/:baseVersion",
-		session, middleware.BodyLimitSessionFile(), proof, PutSessionIndex(deps))
 
 	router.POST("/event-tickets",
 		session, middleware.BodyLimitJSON(), proof, CreateEventTicket(deps))

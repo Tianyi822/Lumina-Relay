@@ -1,8 +1,8 @@
-// session_files.go 维护会话 JSONL 文件与 index.json 的注册表。
+// session_files.go 维护会话密文快照（SQLite 内原子存储）。
 //
-// 服务端不解析文件内容，只登记 (version, size, updated_at) 做 CAS 并发控制；
-// 文件字节由 store.SessionStore 落盘。所有写操作在同一写事务内复核调用设备
-// 仍为 active、仍属 session 中的账号和同步组（AGENTS 安全约束）。
+// 服务端只保存客户端生成的完整密文 BLOB，不解析、不解密；sessionId 在
+// 账号内唯一（客户端全局生成）。所有写操作在同一写事务内完成设备复核、
+// CAS 版本推进与账户配额调整（AGENTS 安全约束）。
 package db
 
 import (
@@ -12,27 +12,33 @@ import (
 	"fmt"
 )
 
+// SessionFileRow 是会话快照行；List 只填元数据，Get 额外携带密文。
 type SessionFileRow struct {
-	SessionID string
-	Version   int64
-	Size      int64
-	UpdatedAt int64
-}
-
-// SessionIndexRow 是 index.json 的注册表行（每同步组一行）。
-type SessionIndexRow struct {
-	Version   int64
-	Size      int64
-	UpdatedAt int64
+	SessionID  string
+	Version    int64
+	Size       int64
+	UpdatedAt  int64
+	Ciphertext []byte
 }
 
 // SessionFilePutResult 与 ManifestPutResult 同构：CAS 冲突时带回当前版本。
 type SessionFilePutResult struct {
 	Version        int64
 	CurrentVersion int64
+	Size           int64
 	Conflict       bool
 }
 
+// SessionFileDeleteResult 描述 CAS 删除的结果：
+// 行不存在时 Deleted=false 且 Conflict=false（幂等删除）。
+type SessionFileDeleteResult struct {
+	Deleted        bool
+	CurrentVersion int64
+	ReclaimedBytes int64
+	Conflict       bool
+}
+
+// ListSessionFiles 只返回元数据（不含密文），按 session_id 排序。
 func (q *Queries) ListSessionFiles(ctx context.Context, accountID, groupID string) ([]SessionFileRow, error) {
 	rows, err := q.db.QueryxContext(ctx, `
 SELECT session_id, version, size, updated_at
@@ -40,33 +46,34 @@ FROM session_files
 WHERE account_id = ? AND sync_group_id = ?
 ORDER BY session_id`, accountID, groupID)
 	if err != nil {
-		return nil, fmt.Errorf("列出会话文件：%w", err)
+		return nil, fmt.Errorf("列出会话快照：%w", err)
 	}
 	defer rows.Close()
 	var out []SessionFileRow
 	for rows.Next() {
 		var item SessionFileRow
 		if err := rows.Scan(&item.SessionID, &item.Version, &item.Size, &item.UpdatedAt); err != nil {
-			return nil, fmt.Errorf("扫描会话文件：%w", err)
+			return nil, fmt.Errorf("扫描会话快照：%w", err)
 		}
 		out = append(out, item)
 	}
 	return out, rows.Err()
 }
 
+// GetSessionFile 读取完整快照（含密文）。其他组占用同 ID 时视为不存在。
 func (q *Queries) GetSessionFile(ctx context.Context, accountID, groupID, sessionID string) (SessionFileRow, error) {
 	var out SessionFileRow
 	err := q.db.QueryRowxContext(ctx, `
-SELECT session_id, version, size, updated_at
+SELECT session_id, version, size, updated_at, ciphertext
 FROM session_files
 WHERE account_id = ? AND sync_group_id = ? AND session_id = ?`,
 		accountID, groupID, sessionID).Scan(
-		&out.SessionID, &out.Version, &out.Size, &out.UpdatedAt)
+		&out.SessionID, &out.Version, &out.Size, &out.UpdatedAt, &out.Ciphertext)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return SessionFileRow{}, sql.ErrNoRows
 		}
-		return SessionFileRow{}, fmt.Errorf("读取会话文件注册表：%w", err)
+		return SessionFileRow{}, fmt.Errorf("读取会话快照：%w", err)
 	}
 	return out, nil
 }
@@ -89,164 +96,171 @@ func (q *Queries) revalidateSessionWriter(ctx context.Context, accountID, groupI
 	return nil
 }
 
-// UpsertSessionFileCAS 以 baseVersion 做 CAS 推进会话文件版本：
+// PutSessionFileCAS 在单个写事务内原子提交密文快照：
 //   - 行不存在时要求 baseVersion == 0，插入 version=1；
-//   - 行存在时要求 version == baseVersion，推进到 baseVersion+1；
-//   - 不匹配返回 Conflict=true 与 CurrentVersion（行不存在时为 0）。
-//
-// 追加与全量重写共用此 CAS（newSize 语义分别为「追加后总大小」与「新文件大小」）。
-func (q *Queries) UpsertSessionFileCAS(
+//   - 行存在时要求 version == baseVersion，推进到 baseVersion+1 并整体替换密文；
+//   - 版本不匹配返回 Conflict=true 与 CurrentVersion（行不存在时为 0）；
+//   - 同账号其他组占用同 ID → ErrSessionIDConflict；
+//   - 增长部分连同 active block reservations 一起做配额检查，超限
+//     ErrQuotaExceeded；提交时同事务调整 accounts.used_bytes。
+func (q *Queries) PutSessionFileCAS(
 	ctx context.Context,
 	accountID, groupID, deviceID, sessionID string,
-	baseVersion, newSize, now int64,
+	baseVersion int64,
+	ciphertext []byte,
+	now int64,
 ) (SessionFilePutResult, error) {
 	var out SessionFilePutResult
 	err := q.WithTx(ctx, func(txq *Queries) error {
 		if err := txq.revalidateSessionWriter(ctx, accountID, groupID, deviceID); err != nil {
 			return err
 		}
-		var current int64
+		// 与块上传共用同一口径：先回收过期 reservation 再统计配额。
+		_, _ = txq.db.ExecContext(ctx,
+			`DELETE FROM upload_reservations WHERE expires_at <= ?`, now)
+
+		// 按账号级主键查询：其他组占用同 ID 是业务错误而非 CAS 冲突。
+		var currentGroupID string
+		var currentVersion, oldSize int64
 		err := txq.db.QueryRowxContext(ctx, `
-SELECT version FROM session_files
-WHERE account_id = ? AND sync_group_id = ? AND session_id = ?`,
-			accountID, groupID, sessionID).Scan(&current)
+SELECT sync_group_id, version, size FROM session_files
+WHERE account_id = ? AND session_id = ?`,
+			accountID, sessionID).Scan(&currentGroupID, &currentVersion, &oldSize)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			if baseVersion != 0 {
 				out = SessionFilePutResult{CurrentVersion: 0, Conflict: true}
 				return nil
 			}
-			if _, err := txq.db.ExecContext(ctx, `
-INSERT INTO session_files (account_id, sync_group_id, session_id, version, size, updated_at)
-VALUES (?, ?, ?, 1, ?, ?)`, accountID, groupID, sessionID, newSize, now); err != nil {
-				return fmt.Errorf("创建会话文件注册行：%w", err)
-			}
-			out = SessionFilePutResult{Version: 1, CurrentVersion: 1}
-			return nil
 		case err != nil:
-			return fmt.Errorf("读取会话文件版本：%w", err)
-		}
-		if current != baseVersion {
-			out = SessionFilePutResult{CurrentVersion: current, Conflict: true}
+			return fmt.Errorf("读取会话快照版本：%w", err)
+		case currentGroupID != groupID:
+			return ErrSessionIDConflict
+		case currentVersion != baseVersion:
+			out = SessionFilePutResult{CurrentVersion: currentVersion, Conflict: true}
 			return nil
 		}
-		next := current + 1
-		result, err := txq.db.ExecContext(ctx, `
-UPDATE session_files SET version = ?, size = ?, updated_at = ?
-WHERE account_id = ? AND sync_group_id = ? AND session_id = ? AND version = ?`,
-			next, newSize, now, accountID, groupID, sessionID, current)
-		if err != nil {
-			return fmt.Errorf("推进会话文件版本：%w", err)
+
+		newSize := int64(len(ciphertext))
+		delta := newSize - oldSize
+		if delta > 0 {
+			var used, quota, reserved int64
+			if err := txq.db.QueryRowxContext(ctx, `
+SELECT used_bytes, quota_bytes FROM accounts WHERE account_id = ?`,
+				accountID).Scan(&used, &quota); err != nil {
+				return fmt.Errorf("读取账户配额：%w", err)
+			}
+			// 与 ReserveBlockUpload 相同的 NOT EXISTS 条件统计 active reservations。
+			if err := txq.db.QueryRowxContext(ctx, `
+SELECT COALESCE(SUM(r.size), 0)
+FROM upload_reservations r
+WHERE r.account_id = ?
+  AND NOT EXISTS (
+      SELECT 1 FROM account_blocks a
+      WHERE a.account_id = r.account_id AND a.block_id = r.block_id
+  )`, accountID).Scan(&reserved); err != nil {
+				return fmt.Errorf("统计上传 reservation：%w", err)
+			}
+			if used+reserved+delta > quota {
+				return ErrQuotaExceeded
+			}
 		}
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return err
+
+		if currentVersion == 0 {
+			if _, err := txq.db.ExecContext(ctx, `
+INSERT INTO session_files (account_id, sync_group_id, session_id, version, ciphertext, size, updated_at)
+VALUES (?, ?, ?, 1, ?, ?, ?)`,
+				accountID, groupID, sessionID, ciphertext, newSize, now); err != nil {
+				return fmt.Errorf("创建会话快照：%w", err)
+			}
+			out = SessionFilePutResult{Version: 1, CurrentVersion: 1, Size: newSize}
+		} else {
+			next := currentVersion + 1
+			result, err := txq.db.ExecContext(ctx, `
+UPDATE session_files SET version = ?, ciphertext = ?, size = ?, updated_at = ?
+WHERE account_id = ? AND session_id = ? AND version = ?`,
+				next, ciphertext, newSize, now, accountID, sessionID, currentVersion)
+			if err != nil {
+				return fmt.Errorf("推进会话快照版本：%w", err)
+			}
+			affected, err := result.RowsAffected()
+			if err != nil {
+				return err
+			}
+			if affected != 1 {
+				return fmt.Errorf("推进会话快照版本：CAS 未命中")
+			}
+			out = SessionFilePutResult{Version: next, CurrentVersion: next, Size: newSize}
 		}
-		if affected != 1 {
-			return fmt.Errorf("推进会话文件版本：CAS 未命中")
+		if delta != 0 {
+			if _, err := txq.db.ExecContext(ctx, `
+UPDATE accounts SET used_bytes = used_bytes + ? WHERE account_id = ?`,
+				delta, accountID); err != nil {
+				return fmt.Errorf("调整账户已用配额：%w", err)
+			}
 		}
-		out = SessionFilePutResult{Version: next, CurrentVersion: next}
 		return nil
 	})
-	return out, err
-}
-
-// DeleteSessionFile 删除注册行；不存在返回 false。事务内复核设备归属。
-func (q *Queries) DeleteSessionFile(
-	ctx context.Context,
-	accountID, groupID, deviceID, sessionID string,
-) (bool, error) {
-	var deleted bool
-	err := q.WithTx(ctx, func(txq *Queries) error {
-		if err := txq.revalidateSessionWriter(ctx, accountID, groupID, deviceID); err != nil {
-			return err
-		}
-		result, err := txq.db.ExecContext(ctx, `
-DELETE FROM session_files
-WHERE account_id = ? AND sync_group_id = ? AND session_id = ?`,
-			accountID, groupID, sessionID)
-		if err != nil {
-			return fmt.Errorf("删除会话文件注册行：%w", err)
-		}
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		deleted = affected == 1
-		return nil
-	})
-	return deleted, err
-}
-
-func (q *Queries) GetSessionIndex(ctx context.Context, accountID, groupID string) (SessionIndexRow, error) {
-	var out SessionIndexRow
-	err := q.db.QueryRowxContext(ctx, `
-SELECT version, size, updated_at
-FROM session_indexes
-WHERE account_id = ? AND sync_group_id = ?`,
-		accountID, groupID).Scan(&out.Version, &out.Size, &out.UpdatedAt)
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return SessionIndexRow{}, sql.ErrNoRows
-		}
-		return SessionIndexRow{}, fmt.Errorf("读取会话索引注册表：%w", err)
+		return SessionFilePutResult{}, err
 	}
 	return out, nil
 }
 
-// UpsertSessionIndexCAS 与 UpsertSessionFileCAS 同语义，作用于 session_indexes。
-func (q *Queries) UpsertSessionIndexCAS(
+// DeleteSessionFileCAS 以 baseVersion 做 CAS 删除快照并释放配额：
+//   - 当前组无此行 → Deleted=false（幂等）；
+//   - 版本不匹配 → Conflict=true 与 CurrentVersion；
+//   - 匹配 → 删除行并在同事务扣减 accounts.used_bytes。
+func (q *Queries) DeleteSessionFileCAS(
 	ctx context.Context,
-	accountID, groupID, deviceID string,
-	baseVersion, newSize, now int64,
-) (SessionFilePutResult, error) {
-	var out SessionFilePutResult
+	accountID, groupID, deviceID, sessionID string,
+	baseVersion int64,
+) (SessionFileDeleteResult, error) {
+	var out SessionFileDeleteResult
 	err := q.WithTx(ctx, func(txq *Queries) error {
 		if err := txq.revalidateSessionWriter(ctx, accountID, groupID, deviceID); err != nil {
 			return err
 		}
-		var current int64
+		var currentVersion, size int64
 		err := txq.db.QueryRowxContext(ctx, `
-SELECT version FROM session_indexes
-WHERE account_id = ? AND sync_group_id = ?`,
-			accountID, groupID).Scan(&current)
-		switch {
-		case errors.Is(err, sql.ErrNoRows):
-			if baseVersion != 0 {
-				out = SessionFilePutResult{CurrentVersion: 0, Conflict: true}
-				return nil
-			}
-			if _, err := txq.db.ExecContext(ctx, `
-INSERT INTO session_indexes (account_id, sync_group_id, version, size, updated_at)
-VALUES (?, ?, 1, ?, ?)`, accountID, groupID, newSize, now); err != nil {
-				return fmt.Errorf("创建会话索引注册行：%w", err)
-			}
-			out = SessionFilePutResult{Version: 1, CurrentVersion: 1}
-			return nil
-		case err != nil:
-			return fmt.Errorf("读取会话索引版本：%w", err)
-		}
-		if current != baseVersion {
-			out = SessionFilePutResult{CurrentVersion: current, Conflict: true}
+SELECT version, size FROM session_files
+WHERE account_id = ? AND sync_group_id = ? AND session_id = ?`,
+			accountID, groupID, sessionID).Scan(&currentVersion, &size)
+		if errors.Is(err, sql.ErrNoRows) {
+			out = SessionFileDeleteResult{}
 			return nil
 		}
-		next := current + 1
-		result, err := txq.db.ExecContext(ctx, `
-UPDATE session_indexes SET version = ?, size = ?, updated_at = ?
-WHERE account_id = ? AND sync_group_id = ? AND version = ?`,
-			next, newSize, now, accountID, groupID, current)
 		if err != nil {
-			return fmt.Errorf("推进会话索引版本：%w", err)
+			return fmt.Errorf("读取会话快照版本：%w", err)
+		}
+		if currentVersion != baseVersion {
+			out = SessionFileDeleteResult{CurrentVersion: currentVersion, Conflict: true}
+			return nil
+		}
+		result, err := txq.db.ExecContext(ctx, `
+DELETE FROM session_files
+WHERE account_id = ? AND sync_group_id = ? AND session_id = ? AND version = ?`,
+			accountID, groupID, sessionID, currentVersion)
+		if err != nil {
+			return fmt.Errorf("删除会话快照：%w", err)
 		}
 		affected, err := result.RowsAffected()
 		if err != nil {
 			return err
 		}
 		if affected != 1 {
-			return fmt.Errorf("推进会话索引版本：CAS 未命中")
+			return fmt.Errorf("删除会话快照：CAS 未命中")
 		}
-		out = SessionFilePutResult{Version: next, CurrentVersion: next}
+		if _, err := txq.db.ExecContext(ctx, `
+UPDATE accounts SET used_bytes = used_bytes - ? WHERE account_id = ?`,
+			size, accountID); err != nil {
+			return fmt.Errorf("释放账户已用配额：%w", err)
+		}
+		out = SessionFileDeleteResult{Deleted: true, ReclaimedBytes: size}
 		return nil
 	})
-	return out, err
+	if err != nil {
+		return SessionFileDeleteResult{}, err
+	}
+	return out, nil
 }

@@ -132,11 +132,6 @@ func DiscardOtherGroups(deps Deps) gin.HandlerFunc {
 			writeServiceError(c, err)
 			return
 		}
-		// 被丢弃组的会话文件目录 best-effort 清理（注册行已随事务级联删除）。
-		if deps.SessionFileService != nil {
-			deps.SessionFileService.RemoveGroupFiles(
-				c.GetString(middleware.CtxAccountID), result.DiscardedGroupIDs)
-		}
 		recipients, _ := deps.Queries.ListDeviceIDsInGroup(
 			c.Request.Context(), c.GetString(middleware.CtxAccountID),
 			c.GetString(middleware.CtxGroupID))

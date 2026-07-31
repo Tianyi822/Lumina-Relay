@@ -106,28 +106,21 @@ CREATE TABLE device_blocks (
 );
 CREATE INDEX idx_device_blocks_block ON device_blocks(block_id);
 
--- 会话 JSONL 文件注册表：服务端只记 (version, size, updated_at)，
--- 文件字节存在 sessions/<accountId>/<groupId>/ 目录下（不透明，不解析行内容）。
--- 注册表是 (version, size) 的唯一权威，读路径按 size 截断屏蔽崩溃残留字节。
+-- 会话密文快照：服务端只存客户端生成的完整密文 BLOB，不解析、不解密。
+-- sessionId 在账号内唯一（客户端全局生成），CAS 版本防并发覆盖。
 CREATE TABLE session_files (
     account_id     TEXT    NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
     sync_group_id  TEXT    NOT NULL REFERENCES sync_groups(group_id) ON DELETE CASCADE,
     session_id     TEXT    NOT NULL,
     version        INTEGER NOT NULL CHECK (version >= 1),
-    size           INTEGER NOT NULL CHECK (size >= 0),
+    ciphertext     BLOB    NOT NULL
+                           CHECK (length(ciphertext) BETWEEN 1 AND 4194304),
+    size           INTEGER NOT NULL CHECK (size = length(ciphertext)),
     updated_at     INTEGER NOT NULL,
-    PRIMARY KEY (account_id, sync_group_id, session_id)
+    PRIMARY KEY (account_id, session_id)
 );
-
--- 会话索引文件（index.json）注册表：每同步组一行，全量重写、无追加。
-CREATE TABLE session_indexes (
-    account_id     TEXT    NOT NULL REFERENCES accounts(account_id) ON DELETE CASCADE,
-    sync_group_id  TEXT    NOT NULL REFERENCES sync_groups(group_id) ON DELETE CASCADE,
-    version        INTEGER NOT NULL CHECK (version >= 1),
-    size           INTEGER NOT NULL CHECK (size >= 0),
-    updated_at     INTEGER NOT NULL,
-    PRIMARY KEY (account_id, sync_group_id)
-);
+CREATE INDEX idx_session_files_group
+    ON session_files(account_id, sync_group_id, session_id);
 
 CREATE TABLE upload_reservations (
     reservation_id  TEXT    PRIMARY KEY,

@@ -18,6 +18,7 @@ func TestHTTPStatus(t *testing.T) {
 		{"invalid_credentials→401", New(CodeInvalidCredentials, ""), 401},
 		{"device_revoked→401", New(CodeDeviceRevoked, ""), 401},
 		{"stale_manifest→409", New(CodeStaleManifest, ""), 409},
+		{"session_id_conflict→409", New(CodeSessionIDConflict, ""), 409},
 		{"block_hash_mismatch→400", New(CodeBlockHashMismatch, ""), 400},
 		{"quota_exceeded→413", New(CodeQuotaExceeded, ""), 413},
 		{"rate_limited→429", New(CodeRateLimited, ""), 429},

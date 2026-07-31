@@ -80,36 +80,7 @@ func PutSessionFile(deps Deps) gin.HandlerFunc {
 			return
 		}
 		sessionID := c.Param("sessionId")
-		result, err := deps.SessionFileService.Rewrite(
-			c.Request.Context(), c.GetString(middleware.CtxAccountID),
-			c.GetString(middleware.CtxGroupID), c.GetString(middleware.CtxDeviceID),
-			sessionID, baseVersion, data)
-		if err != nil {
-			if errors.Is(err, service.ErrStaleSessionFile) {
-				writeStaleSessionFile(c, result.CurrentVersion)
-				return
-			}
-			writeServiceError(c, err)
-			return
-		}
-		publishSessionEvent(c, deps, "session_file_updated", sessionID, result.Version)
-		c.JSON(http.StatusOK, gin.H{"version": result.Version, "size": result.Size})
-	}
-}
-
-func AppendSessionFile(deps Deps) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		baseVersion, err := strconv.ParseInt(c.Param("baseVersion"), 10, 64)
-		if err != nil || baseVersion < 1 {
-			writeBadRequest(c)
-			return
-		}
-		data, ok := readRawBody(c)
-		if !ok {
-			return
-		}
-		sessionID := c.Param("sessionId")
-		result, err := deps.SessionFileService.Append(
+		result, err := deps.SessionFileService.Put(
 			c.Request.Context(), c.GetString(middleware.CtxAccountID),
 			c.GetString(middleware.CtxGroupID), c.GetString(middleware.CtxDeviceID),
 			sessionID, baseVersion, data)
@@ -128,51 +99,16 @@ func AppendSessionFile(deps Deps) gin.HandlerFunc {
 
 func DeleteSessionFile(deps Deps) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		sessionID := c.Param("sessionId")
-		deleted, err := deps.SessionFileService.Delete(
-			c.Request.Context(), c.GetString(middleware.CtxAccountID),
-			c.GetString(middleware.CtxGroupID), c.GetString(middleware.CtxDeviceID),
-			sessionID)
-		if err != nil {
-			writeServiceError(c, err)
-			return
-		}
-		if deleted {
-			publishSessionEvent(c, deps, "session_file_deleted", sessionID, 0)
-		}
-		c.JSON(http.StatusOK, gin.H{"deleted": deleted})
-	}
-}
-
-func GetSessionIndex(deps Deps) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		content, err := deps.SessionFileService.GetIndex(
-			c.Request.Context(), c.GetString(middleware.CtxAccountID),
-			c.GetString(middleware.CtxGroupID))
-		if err != nil {
-			writeServiceError(c, err)
-			return
-		}
-		c.Header("X-Session-File-Version", strconv.FormatInt(content.Version, 10))
-		c.Data(http.StatusOK, "application/octet-stream", content.Data)
-	}
-}
-
-func PutSessionIndex(deps Deps) gin.HandlerFunc {
-	return func(c *gin.Context) {
 		baseVersion, err := strconv.ParseInt(c.Param("baseVersion"), 10, 64)
-		if err != nil || baseVersion < 0 {
+		if err != nil || baseVersion < 1 {
 			writeBadRequest(c)
 			return
 		}
-		data, ok := readRawBody(c)
-		if !ok {
-			return
-		}
-		result, err := deps.SessionFileService.PutIndex(
+		sessionID := c.Param("sessionId")
+		result, err := deps.SessionFileService.Delete(
 			c.Request.Context(), c.GetString(middleware.CtxAccountID),
 			c.GetString(middleware.CtxGroupID), c.GetString(middleware.CtxDeviceID),
-			baseVersion, data)
+			sessionID, baseVersion)
 		if err != nil {
 			if errors.Is(err, service.ErrStaleSessionFile) {
 				writeStaleSessionFile(c, result.CurrentVersion)
@@ -181,7 +117,9 @@ func PutSessionIndex(deps Deps) gin.HandlerFunc {
 			writeServiceError(c, err)
 			return
 		}
-		publishSessionEvent(c, deps, "session_index_updated", "", result.Version)
-		c.JSON(http.StatusOK, gin.H{"version": result.Version, "size": result.Size})
+		if result.Deleted {
+			publishSessionEvent(c, deps, "session_file_deleted", sessionID, 0)
+		}
+		c.JSON(http.StatusOK, gin.H{"deleted": result.Deleted})
 	}
 }

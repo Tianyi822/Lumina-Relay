@@ -14,11 +14,12 @@ import (
 )
 
 var (
-	ErrInvalidSyncCode  = errors.New("invalid sync code")
-	ErrGroupChanged     = errors.New("sync group changed")
-	ErrQuotaExceeded    = errors.New("quota exceeded")
-	ErrUploadInProgress = errors.New("upload in progress")
-	ErrInactiveDevice   = errors.New("inactive device")
+	ErrInvalidSyncCode   = errors.New("invalid sync code")
+	ErrGroupChanged      = errors.New("sync group changed")
+	ErrQuotaExceeded     = errors.New("quota exceeded")
+	ErrUploadInProgress  = errors.New("upload in progress")
+	ErrInactiveDevice    = errors.New("inactive device")
+	ErrSessionIDConflict = errors.New("session id conflict")
 )
 
 // Queries 同时支持 *sqlx.DB 与事务内的 *sqlx.Tx。
@@ -1355,7 +1356,6 @@ const (
 	TableRequestNonces      TableName = "request_nonces"
 	TableUploadReservations TableName = "upload_reservations"
 	TableSessionFiles       TableName = "session_files"
-	TableSessionIndexes     TableName = "session_indexes"
 )
 
 var tableWhitelist = map[TableName]struct{}{
@@ -1363,7 +1363,7 @@ var tableWhitelist = map[TableName]struct{}{
 	TableManifests: {}, TableManifestHeads: {}, TableBlockObjects: {},
 	TableAccountBlocks: {}, TableDeviceBlocks: {}, TableSyncCodes: {},
 	TableRequestNonces: {}, TableUploadReservations: {},
-	TableSessionFiles: {}, TableSessionIndexes: {},
+	TableSessionFiles: {},
 }
 
 func (q *Queries) CountRows(ctx context.Context, dest *int, table TableName) error {

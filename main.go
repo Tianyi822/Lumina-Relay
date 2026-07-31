@@ -76,11 +76,6 @@ func runServer(cfg config.AppConfig) {
 		logger.Error("解析块目录路径失败，退出", logger.Err(err))
 		return
 	}
-	sessionsDir, err := config.DefaultSessionsDir()
-	if err != nil {
-		logger.Error("解析会话目录路径失败，退出", logger.Err(err))
-		return
-	}
 
 	// 建目录（0700：仅属主可读写执行，见 data-layer spec §2.2）
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
@@ -89,10 +84,6 @@ func runServer(cfg config.AppConfig) {
 	}
 	if err := os.MkdirAll(blocksDir, 0o700); err != nil {
 		logger.Error("创建块目录失败，退出", logger.Err(err))
-		return
-	}
-	if err := os.MkdirAll(sessionsDir, 0o700); err != nil {
-		logger.Error("创建会话目录失败，退出", logger.Err(err))
 		return
 	}
 
@@ -136,10 +127,6 @@ func runServer(cfg config.AppConfig) {
 	if err := blockStore.CleanupTempFiles(time.Hour); err != nil {
 		logger.Warn("清理遗留块临时文件失败", logger.Err(err))
 	}
-	sessionStore := store.NewSessionStore(sessionsDir)
-	if err := sessionStore.CleanupTempFiles(time.Hour); err != nil {
-		logger.Warn("清理遗留会话临时文件失败", logger.Err(err))
-	}
 	challenges := auth.NewChallengeStore(4096)
 	eventHub := service.NewEventHub()
 	eventTickets := service.NewEventTicketStore()
@@ -180,7 +167,7 @@ func runServer(cfg config.AppConfig) {
 		SyncService:        service.NewSyncService(q, instanceID, jwtSecret),
 		ManifestService:    service.NewManifestService(q),
 		BlocksService:      blocksService,
-		SessionFileService: service.NewSessionFileService(q, sessionStore),
+		SessionFileService: service.NewSessionFileService(q),
 		EventHub:           eventHub,
 		EventTickets:       eventTickets,
 		JWTSecret:          jwtSecret,

@@ -27,6 +27,7 @@ const (
 	CodeManifestNotFound      Code = "manifest_not_found"
 	CodeSessionFileNotFound   Code = "session_file_not_found"
 	CodeStaleSessionFile      Code = "stale_session_file"
+	CodeSessionIDConflict     Code = "session_id_conflict"
 	CodeInvalidSessionID      Code = "invalid_session_id"
 	CodeBlockBusy             Code = "block_busy"
 	CodeQuotaExceeded         Code = "quota_exceeded"
@@ -76,7 +77,8 @@ func (e *Error) HTTPStatus() int {
 		CodeDeviceRevoked, CodeInvalidSyncCode:
 		return http.StatusUnauthorized
 	case CodeAccountBecameExisting, CodeAlreadyJoined,
-		CodeStaleManifest, CodeStaleSessionFile, CodeGroupChanged, CodeBlockBusy:
+		CodeStaleManifest, CodeStaleSessionFile, CodeSessionIDConflict,
+		CodeGroupChanged, CodeBlockBusy:
 		return http.StatusConflict
 	case CodeBlockHashMismatch, CodeBadRequest, CodeInvalidSessionID:
 		return http.StatusBadRequest

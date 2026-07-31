@@ -68,7 +68,6 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 	}
 	jwtSecret := bytes.Repeat([]byte{8}, 32)
 	blockStore := store.NewBlockStore(filepath.Join(root, "blocks"))
-	sessionStore := store.NewSessionStore(filepath.Join(root, "sessions"))
 	hub := service.NewEventHub()
 	tickets := service.NewEventTicketStore()
 	deps := Deps{
@@ -77,7 +76,7 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 		SyncService:        service.NewSyncService(q, instanceID, jwtSecret),
 		ManifestService:    service.NewManifestService(q),
 		BlocksService:      service.NewBlocksService(q, blockStore),
-		SessionFileService: service.NewSessionFileService(q, sessionStore),
+		SessionFileService: service.NewSessionFileService(q),
 		EventHub:           hub, EventTickets: tickets, Queries: q,
 		JWTSecret: jwtSecret, InstanceID: instanceID,
 	}
@@ -612,49 +611,66 @@ func TestSessionFileFullLifecycle(t *testing.T) {
 	sid := "session-1753857600000-a1b2c3"
 	base := "/session-files/" + sid
 
-	// 创建（baseVersion=0）
-	meta := []byte("{\"kind\":\"meta\",\"v\":1}\n")
-	rec := env.signed(t, a, http.MethodPut, base+"/0", meta)
+	rec := env.signed(t, a, http.MethodPut, base+"/0", []byte("cipher-v1"))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("创建=%d %s", rec.Code, rec.Body.String())
 	}
-	var putResult struct {
+	var put struct {
 		Version int64 `json:"version"`
 		Size    int64 `json:"size"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &putResult); err != nil {
+	if err := json.Unmarshal(rec.Body.Bytes(), &put); err != nil {
 		t.Fatal(err)
 	}
-	if putResult.Version != 1 || putResult.Size != int64(len(meta)) {
-		t.Fatalf("创建结果=%+v", putResult)
+	if put.Version != 1 || put.Size != 9 {
+		t.Fatalf("创建结果=%+v", put)
 	}
 
-	// 追加（baseVersion=1）
-	msg := []byte("{\"kind\":\"message\"}\n")
-	rec = env.signed(t, a, http.MethodPost, base+"/append/1", msg)
+	rec = env.signed(t, a, http.MethodPut, base+"/1", []byte("cipher-v2"))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("追加=%d %s", rec.Code, rec.Body.String())
+		t.Fatalf("覆盖=%d %s", rec.Code, rec.Body.String())
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &putResult); err != nil {
+	if err := json.Unmarshal(rec.Body.Bytes(), &put); err != nil {
 		t.Fatal(err)
 	}
-	if putResult.Version != 2 {
-		t.Fatalf("追加后版本=%d want=2", putResult.Version)
+	if put.Version != 2 || put.Size != 9 {
+		t.Fatalf("覆盖结果=%+v", put)
 	}
 
-	// 读回字节一致
 	rec = env.signed(t, a, http.MethodGet, base, nil)
-	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), append(append([]byte{}, meta...), msg...)) {
-		t.Fatalf("读回=%d body=%q", rec.Code, rec.Body.Bytes())
+	if rec.Code != http.StatusOK || rec.Body.String() != "cipher-v2" {
+		t.Fatalf("读取=%d body=%q", rec.Code, rec.Body.String())
 	}
-	if version := rec.Header().Get("X-Session-File-Version"); version != "2" {
-		t.Fatalf("版本头=%q want=2", version)
+	if got := rec.Header().Get("X-Session-File-Version"); got != "2" {
+		t.Fatalf("版本头=%q want=2", got)
 	}
 
-	// 版本冲突：用过期 baseVersion=0 重写 → 409
-	rec = env.signed(t, a, http.MethodPut, base+"/0", []byte("stale"))
+	rec = env.signed(t, a, http.MethodGet, "/session-files", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("列表=%d %s", rec.Code, rec.Body.String())
+	}
+	var list struct {
+		Sessions []struct {
+			SessionID string `json:"sessionId"`
+			Version   int64  `json:"version"`
+			Size      int64  `json:"size"`
+			UpdatedAt int64  `json:"updatedAt"`
+		} `json:"sessions"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Sessions) != 1 ||
+		list.Sessions[0].SessionID != sid ||
+		list.Sessions[0].Version != 2 ||
+		list.Sessions[0].Size != 9 ||
+		list.Sessions[0].UpdatedAt <= 0 {
+		t.Fatalf("列表=%+v", list.Sessions)
+	}
+
+	rec = env.signed(t, a, http.MethodDelete, base+"/1", nil)
 	if rec.Code != http.StatusConflict {
-		t.Fatalf("冲突重写=%d %s", rec.Code, rec.Body.String())
+		t.Fatalf("过期删除=%d %s", rec.Code, rec.Body.String())
 	}
 	var conflict struct {
 		Error struct {
@@ -665,50 +681,77 @@ func TestSessionFileFullLifecycle(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &conflict); err != nil {
 		t.Fatal(err)
 	}
-	if conflict.Error.Code != "stale_session_file" || conflict.Error.CurrentVersion != 2 {
-		t.Fatalf("冲突响应=%+v", conflict.Error)
+	if conflict.Error.Code != "stale_session_file" ||
+		conflict.Error.CurrentVersion != 2 {
+		t.Fatalf("过期删除响应=%+v", conflict.Error)
 	}
 
-	// 列表
-	rec = env.signed(t, a, http.MethodGet, "/session-files", nil)
-	var listResult struct {
-		Sessions []struct {
-			SessionID string `json:"sessionId"`
-			Version   int64  `json:"version"`
-		} `json:"sessions"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &listResult); err != nil {
-		t.Fatal(err)
-	}
-	if len(listResult.Sessions) != 1 || listResult.Sessions[0].SessionID != sid {
-		t.Fatalf("列表=%+v", listResult.Sessions)
-	}
-
-	// index.json 上传读回
-	indexBody := []byte("{\"schemaVersion\":1,\"sessions\":[]}")
-	rec = env.signed(t, a, http.MethodPut, "/session-files-index/0", indexBody)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("上传 index=%d %s", rec.Code, rec.Body.String())
-	}
-	rec = env.signed(t, a, http.MethodGet, "/session-files-index", nil)
-	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), indexBody) {
-		t.Fatalf("读回 index=%d body=%q", rec.Code, rec.Body.Bytes())
-	}
-
-	// 删除
-	rec = env.signed(t, a, http.MethodDelete, base, nil)
+	rec = env.signed(t, a, http.MethodDelete, base+"/2", nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("删除=%d %s", rec.Code, rec.Body.String())
+	}
+	var deleted struct {
+		Deleted bool `json:"deleted"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &deleted); err != nil {
+		t.Fatal(err)
+	}
+	if !deleted.Deleted {
+		t.Fatalf("删除响应=%+v", deleted)
 	}
 	rec = env.signed(t, a, http.MethodGet, base, nil)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("删除后读取=%d want=404", rec.Code)
 	}
+}
 
-	// 非法 sessionId → 400
-	rec = env.signed(t, a, http.MethodPut, "/session-files/BAD_ID/0", []byte("x"))
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("非法 sessionId=%d want=400 %s", rec.Code, rec.Body.String())
+func TestRemovedSessionRoutesReturn404(t *testing.T) {
+	env := newIntegrationEnv(t)
+	defer env.cleanup()
+	a := env.registerA(t)
+	sid := "session-1-a1b2c3"
+
+	for _, tc := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodPost, "/session-files/" + sid + "/append/1"},
+		{http.MethodGet, "/session-files-index"},
+		{http.MethodPut, "/session-files-index/0"},
+	} {
+		rec := env.signed(t, a, tc.method, tc.path, []byte("cipher"))
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("%s %s status=%d want=404", tc.method, tc.path, rec.Code)
+		}
+	}
+}
+
+func TestSessionIDConflictAcrossGroups(t *testing.T) {
+	env := newIntegrationEnv(t)
+	defer env.cleanup()
+	a := env.registerA(t)
+	sid := "session-1-a1b2c3"
+	path := "/session-files/" + sid + "/0"
+	if rec := env.signed(
+		t, a, http.MethodPut, path, []byte("A"),
+	); rec.Code != http.StatusOK {
+		t.Fatalf("A 创建=%d %s", rec.Code, rec.Body.String())
+	}
+	b, _ := env.login(t, "Device B")
+	rec := env.signed(t, b, http.MethodPut, path, []byte("B"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("B 同 ID 创建=%d %s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.Error.Code != "session_id_conflict" {
+		t.Fatalf("错误码=%q", body.Error.Code)
 	}
 }
 

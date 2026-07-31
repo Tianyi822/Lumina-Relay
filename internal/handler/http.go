@@ -144,6 +144,8 @@ func writeServiceError(c *gin.Context, err error) {
 		writeAPIError(c, apperr.New(apperr.CodeManifestNotFound, "Manifest 不存在"))
 	case errors.Is(err, service.ErrSessionFileNotFound):
 		writeAPIError(c, apperr.New(apperr.CodeSessionFileNotFound, "会话文件不存在"))
+	case errors.Is(err, service.ErrSessionIDConflict):
+		writeAPIError(c, apperr.New(apperr.CodeSessionIDConflict, "会话 ID 已被其他同步组占用"))
 	case errors.Is(err, service.ErrInvalidSessionID):
 		writeAPIError(c, apperr.New(apperr.CodeInvalidSessionID, "会话 ID 格式无效"))
 	case errors.Is(err, service.ErrBlockHashMismatch):
