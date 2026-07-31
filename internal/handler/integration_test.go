@@ -539,7 +539,7 @@ func TestExplicitDiscardRevokesOldGroupAndReleasesQuota(t *testing.T) {
 	}
 }
 
-func TestWebSocketTicketIsSingleUseAndReceivesManifestEvent(t *testing.T) {
+func TestWebSocketTicketIsSingleUseAndReceivesManifestAndSessionEvents(t *testing.T) {
 	env := newIntegrationEnv(t)
 	defer env.cleanup()
 	profile := env.registerA(t)
@@ -590,6 +590,34 @@ func TestWebSocketTicketIsSingleUseAndReceivesManifestEvent(t *testing.T) {
 	if err := wsjson.Read(ctx, connection, &event); err != nil ||
 		event.Type != "manifest_updated" || event.Version != 1 {
 		t.Fatalf("manifest event=%+v err=%v", event, err)
+	}
+
+	rec := env.signed(
+		t, profile, http.MethodPut,
+		"/session-files/session-1-a1b2c3/0", []byte("cipher"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("session PUT=%d %s", rec.Code, rec.Body.String())
+	}
+	var updated service.Event
+	if err := wsjson.Read(ctx, connection, &updated); err != nil ||
+		updated.Type != "session_file_updated" ||
+		updated.SessionID != "session-1-a1b2c3" ||
+		updated.Version != 1 {
+		t.Fatalf("updated=%+v err=%v", updated, err)
+	}
+
+	rec = env.signed(
+		t, profile, http.MethodDelete,
+		"/session-files/session-1-a1b2c3/1", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("session DELETE=%d %s", rec.Code, rec.Body.String())
+	}
+	var deleted service.Event
+	if err := wsjson.Read(ctx, connection, &deleted); err != nil ||
+		deleted.Type != "session_file_deleted" ||
+		deleted.SessionID != "session-1-a1b2c3" ||
+		deleted.Version != 0 {
+		t.Fatalf("deleted=%+v err=%v", deleted, err)
 	}
 
 	replay, replayResponse, replayErr := websocket.Dial(ctx, wsURL, &websocket.DialOptions{

@@ -1,9 +1,9 @@
 // sessions.go 实现会话密文快照的不透明同步服务。
 //
-// 职责边界（见 session-storage-format §9 与 docs/sync-design）：
+// 职责边界（见 docs/sync-design）：
 //   - 服务端不解析密文内容——快照结构、合并、去重全部是客户端职责；
 //   - 服务端只提供整文件原子快照 PUT/GET/DELETE，密文与版本在单个
-//     SQLite 事务内 CAS 提交，sessionId 校验防路径遍历；
+//     SQLite 事务内 CAS 提交，sessionId 校验防恶意输入；
 //   - sessionId 在账号内唯一，被其他同步组占用返回 ErrSessionIDConflict。
 package service
 
@@ -27,8 +27,8 @@ var (
 	ErrSessionIDConflict   = errors.New("session id conflict")
 )
 
-// sessionIDPattern 是客户端 sessionId 规则（session-storage-format §6.1）
-// 的服务端收紧版：正则天然排除 `/`、`\`、`..`，长度上限另行防御。
+// sessionIDPattern 是客户端 sessionId 命名规则的服务端收紧版：
+// 正则天然排除 `/`、`\`、`..`，长度上限另行防御。
 var sessionIDPattern = regexp.MustCompile(`^session-[0-9]{1,16}-[a-z0-9]{1,32}$`)
 
 const maxSessionIDLen = 64
