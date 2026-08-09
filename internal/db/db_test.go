@@ -152,3 +152,18 @@ func TestOpen_AppliesPragmas(t *testing.T) {
 		t.Errorf("foreign_keys = %d, want 1", fk)
 	}
 }
+
+// TestOpen_ConnectionPoolLimits 验证连接池上限生效：modernc sqlite 每个
+// 连接一个文件句柄，无上限时写突发会无界消耗 fd。
+func TestOpen_ConnectionPoolLimits(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("Open 失败：%v", err)
+	}
+	defer db.Close()
+
+	stats := db.Stats()
+	if stats.MaxOpenConnections != maxOpenConns {
+		t.Errorf("MaxOpenConnections = %d, want %d", stats.MaxOpenConnections, maxOpenConns)
+	}
+}

@@ -138,6 +138,7 @@ func runServer(cfg config.AppConfig) {
 	}
 	gcDone := make(chan struct{})
 	go func() {
+		defer logger.RecoverLogOnly() // 子 goroutine：panic 记录后吞掉，不拖垮进程
 		defer close(gcDone)
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()

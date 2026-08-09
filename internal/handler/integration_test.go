@@ -50,7 +50,7 @@ type testProfile struct {
 	groupRevision int64
 }
 
-func newIntegrationEnv(t *testing.T) *integrationEnv {
+func newIntegrationEnv(t *testing.T, mutate ...func(*Deps)) *integrationEnv {
 	t.Helper()
 	root := t.TempDir()
 	dsn := filepath.Join(root, "relay.db")
@@ -79,6 +79,9 @@ func newIntegrationEnv(t *testing.T) *integrationEnv {
 		SessionFileService: service.NewSessionFileService(q),
 		EventHub:           hub, EventTickets: tickets, Queries: q,
 		JWTSecret: jwtSecret, InstanceID: instanceID,
+	}
+	for _, fn := range mutate {
+		fn(&deps)
 	}
 	loginPublic, loginPrivate, _ := ed25519.GenerateKey(rand.Reader)
 	accountPublic, accountPrivate, _ := ed25519.GenerateKey(rand.Reader)

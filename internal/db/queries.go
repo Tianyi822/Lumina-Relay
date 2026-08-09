@@ -1333,6 +1333,32 @@ WHERE block_id = ? AND state = 'deleting'
 	return affected == 1, err
 }
 
+// ListActiveBlockIDs 返回 block_objects 与未过期 upload_reservations 的
+// block_id 并集，用于孤儿物理文件扫描：磁盘上存在但不在此集合中的文件，
+// 即为没有任何 DB 记录的孤儿。排除活跃预留可避免误删正在重新上传的块。
+func (q *Queries) ListActiveBlockIDs(ctx context.Context, now int64) (map[string]struct{}, error) {
+	rows, err := q.db.QueryxContext(ctx, `
+SELECT block_id FROM block_objects
+UNION
+SELECT block_id FROM upload_reservations WHERE expires_at > ?`, now)
+	if err != nil {
+		return nil, fmt.Errorf("列出全部活跃块 id：%w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("扫描活跃块 id：%w", err)
+		}
+		out[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历活跃块 id：%w", err)
+	}
+	return out, nil
+}
+
 func (q *Queries) UseRequestNonce(
 	ctx context.Context,
 	deviceID string,

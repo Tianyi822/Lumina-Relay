@@ -20,6 +20,14 @@ import (
 // foreign_keys=ON：强制外键约束（accounts↔devices↔blocks），防御性兜底。
 const sqlitePragmas = "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)&_txlock=immediate"
 
+// 连接池上限：modernc sqlite 每个连接是独立文件句柄与连接状态；写操作被
+// _txlock=immediate 全局串行化，无限池在写突发下只会无界消耗 fd（macOS
+// 默认软限制 256）而不会提升吞吐。MaxOpenConns 控峰值、MaxIdleConns 控常驻。
+const (
+	maxOpenConns = 32
+	maxIdleConns = 8
+)
+
 // withPragmas 给原始 DSN（通常是文件路径）附加 pragma 查询参数。
 // 若 DSN 已含查询串则用 & 拼接，否则用 ? 起始。
 func withPragmas(dsn string) string {
@@ -37,5 +45,7 @@ func Open(dsn string) (*sqlx.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("打开数据库：%w", err)
 	}
+	db.SetMaxOpenConns(maxOpenConns)
+	db.SetMaxIdleConns(maxIdleConns)
 	return db, nil
 }

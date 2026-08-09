@@ -157,7 +157,8 @@ func (s *BlocksService) Prune(
 }
 
 // CollectGarbage 回收已超过宽限期的物理孤儿块。数据库先把对象认领为
-// deleting，使新上传在文件删除窗口内返回可重试冲突。
+// deleting，使新上传在文件删除窗口内返回可重试冲突；随后补扫磁盘上
+// 没有任何 DB 行的孤儿文件（PutNew 已安装而 CommitBlockUpload 失败的残留）。
 func (s *BlocksService) CollectGarbage(ctx context.Context) (int, error) {
 	now := s.now()
 	ids, err := s.q.ClaimCollectibleBlocks(
@@ -179,6 +180,50 @@ func (s *BlocksService) CollectGarbage(ctx context.Context) (int, error) {
 		}
 		if !finalized {
 			errs = append(errs, fmt.Errorf("块 %s 的 GC 认领已失效", id))
+			continue
+		}
+		collected++
+	}
+
+	// 孤儿文件回收作为第二通道：补漏"文件已落盘、元数据从未入库"的中间态，
+	// 该路径不依赖 block_objects 行，崩溃残留也能被兜底清理。
+	orphaned, err := s.collectOrphanFiles(ctx)
+	if err != nil {
+		errs = append(errs, err)
+	}
+	return collected + orphaned, errors.Join(errs...)
+}
+
+// collectOrphanFiles 删除磁盘上存在、但 block_objects 与活跃 upload_reservations
+// 中都没有对应行的物理孤儿块。这些文件是 PutNew 已原子安装、而后续
+// CommitBlockUpload 失败（客户端断连、DB 错误、进程崩溃）时留下的；现有按
+// block_objects 行的 GC 认领发现不了它们。
+// 仅回收修改时间早于宽限期的文件：上传从 PutNew 到 Commit 通常不足 1 秒，
+// 宽限期保证在途上传与刚失败的残留都得到保护，避免误删。
+func (s *BlocksService) collectOrphanFiles(ctx context.Context) (int, error) {
+	files, err := s.bs.ListFiles()
+	if err != nil {
+		return 0, err
+	}
+	if len(files) == 0 {
+		return 0, nil
+	}
+	known, err := s.q.ListActiveBlockIDs(ctx, s.now().Unix())
+	if err != nil {
+		return 0, err
+	}
+	cutoff := s.now().Add(-BlockOrphanGracePeriod)
+	collected := 0
+	var errs []error
+	for _, f := range files {
+		if f.ModTime.After(cutoff) {
+			continue // 宽限期内，可能是进行中的上传
+		}
+		if _, ok := known[f.ID]; ok {
+			continue // 有 DB 行或活跃预留，不是孤儿
+		}
+		if err := s.bs.Delete(f.ID); err != nil {
+			errs = append(errs, fmt.Errorf("删除孤儿块 %s：%w", f.ID, err))
 			continue
 		}
 		collected++
