@@ -14,11 +14,12 @@ import (
 )
 
 var (
-	ErrInvalidSyncCode  = errors.New("invalid sync code")
-	ErrGroupChanged     = errors.New("sync group changed")
-	ErrQuotaExceeded    = errors.New("quota exceeded")
-	ErrUploadInProgress = errors.New("upload in progress")
-	ErrInactiveDevice   = errors.New("inactive device")
+	ErrInvalidSyncCode   = errors.New("invalid sync code")
+	ErrGroupChanged      = errors.New("sync group changed")
+	ErrQuotaExceeded     = errors.New("quota exceeded")
+	ErrUploadInProgress  = errors.New("upload in progress")
+	ErrInactiveDevice    = errors.New("inactive device")
+	ErrSessionIDConflict = errors.New("session id conflict")
 )
 
 // Queries 同时支持 *sqlx.DB 与事务内的 *sqlx.Tx。
@@ -253,11 +254,11 @@ WHERE device_id = ? AND account_id = ? AND sync_group_id = ? AND status = 'activ
 }
 
 type DeviceListRow struct {
-	DeviceID   string
-	DeviceName string
-	CreatedAt  int64
-	LastSeenAt int64
-	Status     string
+	DeviceID   string `json:"deviceId"`
+	DeviceName string `json:"deviceName"`
+	CreatedAt  int64  `json:"createdAt"`
+	LastSeenAt int64  `json:"lastSeenAt"`
+	Status     string `json:"status"`
 }
 
 func (q *Queries) ListDevicesInGroup(ctx context.Context, accountID, groupID string) ([]DeviceListRow, error) {
@@ -335,8 +336,13 @@ SELECT EXISTS (
     JOIN device_blocks b ON b.device_id = d.device_id
     WHERE d.account_id = ? AND d.sync_group_id IS NOT NULL
       AND d.sync_group_id <> ?
+    UNION ALL
+    SELECT 1
+    FROM session_files s
+    WHERE s.account_id = ? AND s.sync_group_id <> ?
     LIMIT 1
-)`, accountID, currentGroupID, accountID, currentGroupID).Scan(&exists)
+)`, accountID, currentGroupID, accountID, currentGroupID,
+		accountID, currentGroupID).Scan(&exists)
 	if err != nil {
 		return false, fmt.Errorf("检查其他同步数据：%w", err)
 	}
@@ -344,9 +350,9 @@ SELECT EXISTS (
 }
 
 type ManifestHeadRow struct {
-	DeviceID       string
-	CurrentVersion int64
-	UpdatedAt      int64
+	DeviceID       string `json:"deviceId"`
+	CurrentVersion int64  `json:"currentVersion"`
+	UpdatedAt      int64  `json:"updatedAt"`
 }
 
 func (q *Queries) ListManifestHeads(ctx context.Context, accountID, groupID string) ([]ManifestHeadRow, error) {
@@ -623,6 +629,15 @@ WHERE sync_group_id = ? AND consumed_at IS NULL`,
 			`UPDATE sync_codes SET consumed_at = ? WHERE code_id = ? AND consumed_at IS NULL`,
 			now, code.CodeID); err != nil {
 			return fmt.Errorf("消费邀请码：%w", err)
+		}
+		// 先把 loser 组的会话快照迁入 winner 组，再删除 loser 组，
+		// 避免外键级联误删已提交的密文（sessionId 账号内唯一，不会冲突）。
+		if _, err := txq.db.ExecContext(ctx, `
+UPDATE session_files
+SET sync_group_id = ?
+WHERE account_id = ? AND sync_group_id = ?`,
+			winner.GroupID, accountID, loser.GroupID); err != nil {
+			return fmt.Errorf("迁移会话文件：%w", err)
 		}
 		if _, err := txq.db.ExecContext(ctx,
 			`DELETE FROM sync_groups WHERE group_id = ?`, loser.GroupID); err != nil {
@@ -1107,6 +1122,16 @@ WHERE d.account_id = ? AND d.sync_group_id <> ?`, accountID, currentGroupID)
 			return err
 		}
 
+		// 先统计被丢弃组的会话字节；行本身由 sync_groups 外键级联删除。
+		var sessionBytes int64
+		if err := txq.db.QueryRowxContext(ctx, `
+SELECT COALESCE(SUM(size), 0)
+FROM session_files
+WHERE account_id = ? AND sync_group_id <> ?`,
+			accountID, currentGroupID).Scan(&sessionBytes); err != nil {
+			return fmt.Errorf("统计被丢弃会话字节：%w", err)
+		}
+
 		if _, err := txq.db.ExecContext(ctx, `
 DELETE FROM manifests WHERE device_id IN (
     SELECT device_id FROM devices
@@ -1139,6 +1164,16 @@ WHERE account_id = ? AND sync_group_id <> ?`,
 DELETE FROM sync_groups WHERE account_id = ? AND group_id <> ?`,
 			accountID, currentGroupID); err != nil {
 			return err
+		}
+		// 级联删除完成后在同一事务内释放会话配额。
+		if sessionBytes > 0 {
+			if _, err := txq.db.ExecContext(ctx, `
+UPDATE accounts
+SET used_bytes = used_bytes - ?
+WHERE account_id = ?`, sessionBytes, accountID); err != nil {
+				return fmt.Errorf("释放会话配额：%w", err)
+			}
+			out.ReclaimedBytes += sessionBytes
 		}
 		var released PruneResult
 		for _, id := range blockIDs {
@@ -1298,6 +1333,32 @@ WHERE block_id = ? AND state = 'deleting'
 	return affected == 1, err
 }
 
+// ListActiveBlockIDs 返回 block_objects 与未过期 upload_reservations 的
+// block_id 并集，用于孤儿物理文件扫描：磁盘上存在但不在此集合中的文件，
+// 即为没有任何 DB 记录的孤儿。排除活跃预留可避免误删正在重新上传的块。
+func (q *Queries) ListActiveBlockIDs(ctx context.Context, now int64) (map[string]struct{}, error) {
+	rows, err := q.db.QueryxContext(ctx, `
+SELECT block_id FROM block_objects
+UNION
+SELECT block_id FROM upload_reservations WHERE expires_at > ?`, now)
+	if err != nil {
+		return nil, fmt.Errorf("列出全部活跃块 id：%w", err)
+	}
+	defer rows.Close()
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("扫描活跃块 id：%w", err)
+		}
+		out[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历活跃块 id：%w", err)
+	}
+	return out, nil
+}
+
 func (q *Queries) UseRequestNonce(
 	ctx context.Context,
 	deviceID string,
@@ -1332,6 +1393,7 @@ const (
 	TableSyncCodes          TableName = "sync_codes"
 	TableRequestNonces      TableName = "request_nonces"
 	TableUploadReservations TableName = "upload_reservations"
+	TableSessionFiles       TableName = "session_files"
 )
 
 var tableWhitelist = map[TableName]struct{}{
@@ -1339,6 +1401,7 @@ var tableWhitelist = map[TableName]struct{}{
 	TableManifests: {}, TableManifestHeads: {}, TableBlockObjects: {},
 	TableAccountBlocks: {}, TableDeviceBlocks: {}, TableSyncCodes: {},
 	TableRequestNonces: {}, TableUploadReservations: {},
+	TableSessionFiles: {},
 }
 
 func (q *Queries) CountRows(ctx context.Context, dest *int, table TableName) error {

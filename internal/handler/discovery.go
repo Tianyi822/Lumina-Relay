@@ -10,12 +10,13 @@ import (
 )
 
 type discoveryLimits struct {
-	MaxJSONBytes       int   `json:"maxJsonBytes"`
-	MaxManifestBytes   int   `json:"maxManifestBytes"`
-	MaxBlockBytes      int   `json:"maxBlockBytes"`
-	MaxMissingIDs      int   `json:"maxMissingIds"`
-	MaxDeviceNameBytes int   `json:"maxDeviceNameBytes"`
-	BlockGCGraceSec    int64 `json:"blockGcGraceSeconds"`
+	MaxJSONBytes        int   `json:"maxJsonBytes"`
+	MaxManifestBytes    int   `json:"maxManifestBytes"`
+	MaxSessionFileBytes int   `json:"maxSessionFileBytes"`
+	MaxBlockBytes       int   `json:"maxBlockBytes"`
+	MaxMissingIDs       int   `json:"maxMissingIds"`
+	MaxDeviceNameBytes  int   `json:"maxDeviceNameBytes"`
+	BlockGCGraceSec     int64 `json:"blockGcGraceSeconds"`
 }
 
 type discoveryResponse struct {
@@ -39,11 +40,12 @@ func Discovery(instanceID string) gin.HandlerFunc {
 			ServerTimeMS: time.Now().UnixMilli(),
 			Capabilities: []string{
 				"password-proof", "device-proof", "sync-groups",
-				"device-manifests", "websocket-events",
+				"device-manifests", "session-files", "websocket-events",
 			},
 			Limits: discoveryLimits{
 				MaxJSONBytes: 64 << 10, MaxManifestBytes: service.MaxManifestBytes,
-				MaxBlockBytes: 1 << 20, MaxMissingIDs: 1000,
+				MaxSessionFileBytes: service.MaxSessionFileBytes,
+				MaxBlockBytes:       1 << 20, MaxMissingIDs: 1000,
 				MaxDeviceNameBytes: service.MaxDeviceNameBytes,
 				BlockGCGraceSec:    int64(service.BlockOrphanGracePeriod / time.Second),
 			},

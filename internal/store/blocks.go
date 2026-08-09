@@ -44,6 +44,40 @@ func (s *BlockStore) PathFor(id string) string {
 	return filepath.Join(s.root, id[0:2], id[0:4], id)
 }
 
+// BlockFile 描述磁盘上的一个正式块文件（含修改时间），供 GC 扫描孤儿文件。
+type BlockFile struct {
+	ID      string
+	ModTime time.Time
+}
+
+// ListFiles 列出 root 下所有正式块文件（跳过目录与 .tmp- 残留临时文件），
+// 供 GC 判断"磁盘存在但 DB 无行"的孤儿块。root 尚不存在时返回空列表。
+func (s *BlockStore) ListFiles() ([]BlockFile, error) {
+	var files []BlockFile
+	err := filepath.WalkDir(s.root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			// 遍历中途错误（如目录被并发清理）只跳过该文件，不中断整体扫描。
+			return nil
+		}
+		if entry.IsDir() || strings.Contains(entry.Name(), ".tmp-") {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return nil
+		}
+		files = append(files, BlockFile{ID: entry.Name(), ModTime: info.ModTime()})
+		return nil
+	})
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("扫描块文件：%w", err)
+	}
+	return files, nil
+}
+
 // PutNew 先在目标 shard 写临时文件并 fsync，再用 hard-link no-replace 语义
 // 原子安装；目标已存在时绝不覆盖。
 func (s *BlockStore) PutNew(id string, data []byte) (created bool, err error) {

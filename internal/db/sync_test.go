@@ -98,6 +98,40 @@ func TestRedeemSyncCodeMergesTransitively(t *testing.T) {
 	}
 }
 
+func TestRedeemSyncCodePreservesBothGroupsSessionFiles(t *testing.T) {
+	q, cleanup := openTestQueries(t)
+	defer cleanup()
+	seedAccountAndDevice(t, q, "account", "alice", "A", "group-a", 1)
+	seedAccountAndDevice(t, q, "account", "alice", "B", "group-b", 2)
+	ctx := context.Background()
+
+	if _, err := q.PutSessionFileCAS(
+		ctx, "account", "group-a", "A", "session-1-a", 0, []byte("A"), 3); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.PutSessionFileCAS(
+		ctx, "account", "group-b", "B", "session-2-b", 0, []byte("BB"), 4); err != nil {
+		t.Fatal(err)
+	}
+	mac := sha256.Sum256([]byte("merge-sessions"))
+	if err := q.ReplaceSyncCode(ctx, SyncCodeRow{
+		CodeID: "session-merge", AccountID: "account", SyncGroupID: "group-a",
+		InviterDeviceID: "A", CodeMAC: mac[:], ExpiresAt: 100, CreatedAt: 5,
+	}, 5); err != nil {
+		t.Fatal(err)
+	}
+	merged, err := q.RedeemSyncCode(ctx, "account", "B", mac[:], 6)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := q.ListSessionFiles(ctx, "account", merged.CanonicalGroupID)
+	if err != nil || len(rows) != 2 ||
+		rows[0].SessionID != "session-1-a" ||
+		rows[1].SessionID != "session-2-b" {
+		t.Fatalf("合并后 sessions=%+v err=%v", rows, err)
+	}
+}
+
 func TestSyncCodeExpiresAndCannotBeReplayed(t *testing.T) {
 	q, cleanup := openTestQueries(t)
 	defer cleanup()

@@ -3,6 +3,7 @@ package store
 import (
 	"bytes"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -115,5 +116,43 @@ func TestBlockStore_PutNew_ShortIDRejected(t *testing.T) {
 		if _, err := s.PutNew(id, []byte("x")); err == nil {
 			t.Fatalf("短 id %q 应被拒绝，但 PutNew 返回 nil", id)
 		}
+	}
+}
+
+// TestBlockStore_ListFiles_SkipsTempAndDirs 验证 ListFiles 只列出正式块文件，
+// 跳过目录与 .tmp- 残留临时文件（孤儿文件扫描依赖此语义）。
+func TestBlockStore_ListFiles_SkipsTempAndDirs(t *testing.T) {
+	s := newTestStore(t)
+	id := "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	if _, err := s.PutNew(id, []byte("payload")); err != nil {
+		t.Fatalf("PutNew 失败：%v", err)
+	}
+	// 制造一个崩溃遗留的临时文件，应被 ListFiles 忽略。
+	shardDir := filepath.Join(s.root, id[0:2], id[0:4])
+	temp, err := os.CreateTemp(shardDir, "."+id+".tmp-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = temp.Close()
+
+	files, err := s.ListFiles()
+	if err != nil {
+		t.Fatalf("ListFiles 失败：%v", err)
+	}
+	if len(files) != 1 || files[0].ID != id {
+		t.Fatalf("ListFiles = %+v, want 仅正式块 %s", files, id)
+	}
+}
+
+// TestBlockStore_ListFiles_MissingRoot 验证 root 尚不存在时返回空列表而非错误，
+// 覆盖首次部署尚未写入任何块、但 GC 先行启动的场景。
+func TestBlockStore_ListFiles_MissingRoot(t *testing.T) {
+	s := NewBlockStore(filepath.Join(t.TempDir(), "blocks"))
+	files, err := s.ListFiles()
+	if err != nil {
+		t.Fatalf("root 不存在时 ListFiles 应返回 nil：%v", err)
+	}
+	if len(files) != 0 {
+		t.Fatalf("root 不存在时应有 0 个文件，得到 %d", len(files))
 	}
 }

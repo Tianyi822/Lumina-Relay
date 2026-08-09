@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"lumina-relay/internal/apperr"
+	"lumina-relay/internal/logger"
 	"lumina-relay/internal/service"
 )
 
@@ -115,6 +116,17 @@ func writeAPIError(c *gin.Context, apiError *apperr.Error) {
 		requestID = uuid.NewString()
 	}
 	apiError.Extra["requestId"] = requestID
+	// 5xx 记录结构化错误日志：AccessLog 只记状态码，这里补上 code/message
+	// 与 requestId，否则内部故障只剩一个 500 无法定位。
+	if status := apiError.HTTPStatus(); status >= 500 {
+		logger.Error("api_error",
+			logger.Int("status", status),
+			logger.String("code", string(apiError.Code)),
+			logger.String("message", apiError.Message),
+			logger.String("request_id", requestID),
+			logger.String("path", c.Request.URL.Path),
+		)
+	}
 	apiError.WriteJSON(c.Writer)
 	c.Abort()
 }
@@ -142,6 +154,12 @@ func writeServiceError(c *gin.Context, err error) {
 		writeAPIError(c, apperr.New(apperr.CodeStaleManifest, "Manifest 基础版本已过期"))
 	case errors.Is(err, service.ErrManifestNotFound):
 		writeAPIError(c, apperr.New(apperr.CodeManifestNotFound, "Manifest 不存在"))
+	case errors.Is(err, service.ErrSessionFileNotFound):
+		writeAPIError(c, apperr.New(apperr.CodeSessionFileNotFound, "会话文件不存在"))
+	case errors.Is(err, service.ErrSessionIDConflict):
+		writeAPIError(c, apperr.New(apperr.CodeSessionIDConflict, "会话 ID 已被其他同步组占用"))
+	case errors.Is(err, service.ErrInvalidSessionID):
+		writeAPIError(c, apperr.New(apperr.CodeInvalidSessionID, "会话 ID 格式无效"))
 	case errors.Is(err, service.ErrBlockHashMismatch):
 		writeAPIError(c, apperr.New(apperr.CodeBlockHashMismatch, "块 SHA-256 不匹配"))
 	case errors.Is(err, service.ErrBlockNotFound):
@@ -151,6 +169,12 @@ func writeServiceError(c *gin.Context, err error) {
 	case errors.Is(err, service.ErrQuotaExceeded):
 		writeAPIError(c, apperr.New(apperr.CodeQuotaExceeded, "账户存储配额不足"))
 	default:
+		// 未知错误（多为 DB/文件系统故障）：记录完整错误链供排查——
+		// 客户端只收到泛化 500，错误细节绝不能泄漏到响应体。
+		logger.Error("service internal error",
+			logger.Err(err),
+			logger.String("path", c.Request.URL.Path),
+		)
 		writeAPIError(c, apperr.New(apperr.CodeInternalError, "服务内部错误"))
 	}
 }

@@ -5,7 +5,7 @@ This file provides guidance to Qoder (qoder.com) when working with code in this 
 
 ## 项目概述
 
-Lumina Relay 是一个**端到端加密（E2EE）笔记同步服务**的后端。服务端是"按 hash 存取密文块的哑存储"——**从不接触明文、不解密任何内容**。所有加密/解密在客户端完成；服务端只存密码派生登录公钥、DEK 密文信封、设备级密文 Manifest、同步组关系和按内容 hash 寻址的密文块。
+Lumina Relay 是一个**端到端加密（E2EE）笔记同步服务**的后端。服务端是"按 hash 存取密文块的哑存储"——**从不接触明文、不解密任何内容**。所有加密/解密在客户端完成；服务端只存密码派生登录公钥、DEK 密文信封、设备级密文 Manifest、会话密文快照、同步组关系和按内容 hash 寻址的密文块。
 
 - **Go 1.26**，纯 Go 无 cgo（SQLite 用 `modernc.org/sqlite`）
 - HTTP 路由基于 gin，**无 `/v1` 前缀、无 legacy 路由**——不要恢复旧版路由、类型、迁移或密码学标签
@@ -50,17 +50,17 @@ go run ./cmd/loadtest -target http://localhost:8443 -endpoint discovery
 
 ### 文件按功能拆分（非旧的单文件大包）
 `feat/client-sync-api-alignment` 把 handler/service/auth 按功能拆细了，改代码前先认路径：
-- **handler**（`internal/handler/`）：`connection.go`（`/connections/*`、`/session-challenges`、`/sessions`）、`discovery.go`、`manifests.go`、`blocks.go`（`blocks.go` 已含 prune/missing）、`sync.go`（sync-codes、sync-groups/discard-others、devices 列表/吊销）、`events.go`（`/event-tickets` + `/events` WebSocket）、`health.go`、`http.go`（共享写响应 helper）、`router.go`（唯一挂路由处）。
-- **service**（`internal/service/`）：`connection.go`/`sync.go`/`manifest.go`/`blocks.go`/`events.go` 一一对应；旧的 `account.go`/`device.go` 已删，其职责并入 `connection.go`+`sync.go`。
+- **handler**（`internal/handler/`）：`connection.go`（`/connections/*`、`/session-challenges`、`/sessions`）、`discovery.go`、`manifests.go`、`blocks.go`（missing/上传/下载；prune 仅保留内部回收逻辑，未挂路由）、`sync.go`（sync-codes、sync-groups/discard-others、devices 列表/吊销）、`session_files.go`（`/session-files*` 会话密文快照的 list/GET/PUT/DELETE 与事件广播）、`events.go`（`/event-tickets` + `/events` WebSocket）、`health.go`、`http.go`（共享写响应 helper）、`router.go`（唯一挂路由处）。
+- **service**（`internal/service/`）：`connection.go`/`sync.go`/`manifest.go`/`blocks.go`/`sessions.go`/`events.go` 一一对应（`sessions.go` 负责会话快照的 sessionId 校验与 CAS 错误映射）；旧的 `account.go`/`device.go` 已删，其职责并入 `connection.go`+`sync.go`。
 - **auth**（`internal/auth/`）：`signature.go`（Ed25519 验签 + `BuildCanonical`）、`transcript.go`（`BuildTranscript` 及各生命周期 transcript）、`challenge.go`（一次性 challenge store，失败也消费防在线猜测）、`secret.go`（JWT 密钥 load-or-generate）、`jwt.go`（HS256 session token 签发/解析）。
-- **db**（`internal/db/`）：`queries.go`（所有手写 SQL）、`relay_meta.go`（**Relay instanceId 单例持久化**，`GetOrCreateInstanceID`：32 字节随机 + base64url，`INSERT OR IGNORE` 收敛并发首调）、`db.go`（Open + pragma）、`migrate.go`（golang-migrate）。
+- **db**（`internal/db/`）：`queries.go`（所有手写 SQL）、`session_files.go`（`session_files` 表的单事务 CAS 读写与配额调整）、`relay_meta.go`（**Relay instanceId 单例持久化**，`GetOrCreateInstanceID`：32 字节随机 + base64url，`INSERT OR IGNORE` 收敛并发首调）、`db.go`（Open + pragma）、`migrate.go`（golang-migrate）。
 
 ### 认证与同步授权（`internal/middleware/`）
 路由按用途挂不同中间件组合：
 | 层级 | 端点 | 中间件 |
 |---|---|---|
 | 无认证 | discovery、connection/session challenge、health | `LimitByClientIP`（HashedLimiter）+ body limit |
-| 账户数据 | bootstrap、sync-codes、devices、manifests、blocks、prune、sync-groups、event-tickets | `RequireSession` + body limit + `RequireDeviceProof` |
+| 账户数据 | bootstrap、sync-codes、devices、manifests、blocks、session-files、sync-groups、event-tickets | `RequireSession` + body limit + `RequireDeviceProof` |
 | WebSocket | `/events` | 30 秒单次 event ticket（`Sec-WebSocket-Protocol: lumina-events, ticket.<t>`） |
 
 - `RequireSession` 严格解析绑定 instance/device 的 HS256 JWT，查设备记录，拒绝已吊销设备，并把 `accountId/deviceId/devicePublicKey/syncGroupId` 注入 context。
@@ -79,6 +79,7 @@ go run ./cmd/loadtest -target http://localhost:8443 -endpoint discovery
 - **`db.Queries`**（`internal/db/queries.go`）持有 `sqlx.ExtContext` 接口，所以**同一类型既能基于 `*sqlx.DB`，也能基于事务**（`WithTx` 传入绑定到 tx 的子 Queries）。SQL 全部是包级 `const`，动态值经 `?` 占位符绑定。
 - **密文块存储**（`internal/store/blocks.go`）：文件系统按 `id[0:2]/id[0:4]/<id>` 分桶，临时文件 fsync 后用 no-replace hard-link 原子安装。`block_objects` 管物理对象，`account_blocks` 管配额，`device_blocks` 管同步组可见性。
 - **Manifest 按设备 CAS**：每台设备只推进自己的 head；组内读取各设备最新密文，由客户端解密后按 HLC LWW 合并。
+- **会话密文快照存 SQLite BLOB**（`session_files` 表，(account_id, session_id) 主键）：sessionId 账号内唯一（被其他同步组占用返回 `session_id_conflict`），密文与版本在单个事务内 CAS 提交并同步调整账号配额；同步组合并保留双方 session，discard 释放被放弃组的 session 配额。服务端不解析快照内容，合并/去重是客户端职责。
 
 ### 统一错误模型（`internal/apperr/`）
 所有业务错误用 `apperr.Error{Code, Message, Extra}`，`Code` 是稳定的 snake_case 字符串，`HTTPStatus()` 做 code→HTTP 映射（未知 code 兜底 500），`WriteJSON` 输出 `{ "error": { "code", "message", <extra> } }`。service 层用哨兵 error，handler 层 `errors.Is` 判定后映射。**改错误码或 HTTP 状态会破坏前端契约**。
@@ -96,7 +97,7 @@ go run ./cmd/loadtest -target http://localhost:8443 -endpoint discovery
 ## 安全约束（改代码时务必保留）
 
 - **`SetTrustedProxies([]string{"127.0.0.1"})`**：仅信任本机反代，否则攻击者可伪造 `X-Forwarded-For` 绕过 IP 限流。部署架构变化（如 K8s pod 网段）需同步调整。
-- **请求体大小限制**（`middleware/body_limit.go`）：块上传 1 MiB、JSON 端点 64 KiB、**原始密文 Manifest 4 MiB**。三条独立中间件按路由挂。`HandleBodyReadError` 必须显式写 413——gin 的 ResponseWriter 不实现 stdlib 的 `requestTooLarge` 接口，否则超大上传会静默"成功"(200) 跳过校验。
+- **请求体大小限制**（`middleware/body_limit.go`）：块上传 1 MiB、JSON 端点 64 KiB、**原始密文 Manifest 4 MiB**、**会话密文快照同为 4 MiB**。四条独立中间件按路由挂。`HandleBodyReadError` 必须显式写 413——gin 的 ResponseWriter 不实现 stdlib 的 `requestTooLarge` 接口，否则超大上传会静默"成功"(200) 跳过校验。
 - **账户存在性按产品要求公开**：`connections/start` 返回 `accountExists`，但同时按 IP 和规范化用户名的不可逆 hash 限流；错误密码不得创建设备。
 - **同步码**：仅同账号 active 设备可兑换，5 分钟、单次使用、数据库只存 HMAC；失败按设备限流。
 - 跨账户和跨组写操作必须在同一个 SQLite 写事务内复核调用设备仍为 active、仍属于 session 中的账号和同步组；不能只依赖事务外的中间件快照。

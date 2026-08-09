@@ -138,6 +138,7 @@ func runServer(cfg config.AppConfig) {
 	}
 	gcDone := make(chan struct{})
 	go func() {
+		defer logger.RecoverLogOnly() // 子 goroutine：panic 记录后吞掉，不拖垮进程
 		defer close(gcDone)
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
@@ -164,14 +165,15 @@ func runServer(cfg config.AppConfig) {
 	deps := handler.Deps{
 		ConnectionService: service.NewConnectionService(
 			q, challenges, instanceID, jwtSecret, cfg.Storage.QuotaMB),
-		SyncService:     service.NewSyncService(q, instanceID, jwtSecret),
-		ManifestService: service.NewManifestService(q),
-		BlocksService:   blocksService,
-		EventHub:        eventHub,
-		EventTickets:    eventTickets,
-		JWTSecret:       jwtSecret,
-		Queries:         q,
-		InstanceID:      instanceID,
+		SyncService:        service.NewSyncService(q, instanceID, jwtSecret),
+		ManifestService:    service.NewManifestService(q),
+		BlocksService:      blocksService,
+		SessionFileService: service.NewSessionFileService(q),
+		EventHub:           eventHub,
+		EventTickets:       eventTickets,
+		JWTSecret:          jwtSecret,
+		Queries:            q,
+		InstanceID:         instanceID,
 	}
 
 	logger.Info("HTTP 服务即将监听",

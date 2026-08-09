@@ -25,6 +25,10 @@ const (
 	CodeBlockHashMismatch     Code = "block_hash_mismatch"
 	CodeBlockNotFound         Code = "block_not_found"
 	CodeManifestNotFound      Code = "manifest_not_found"
+	CodeSessionFileNotFound   Code = "session_file_not_found"
+	CodeStaleSessionFile      Code = "stale_session_file"
+	CodeSessionIDConflict     Code = "session_id_conflict"
+	CodeInvalidSessionID      Code = "invalid_session_id"
 	CodeBlockBusy             Code = "block_busy"
 	CodeQuotaExceeded         Code = "quota_exceeded"
 	CodeRateLimited           Code = "rate_limited"
@@ -73,11 +77,12 @@ func (e *Error) HTTPStatus() int {
 		CodeDeviceRevoked, CodeInvalidSyncCode:
 		return http.StatusUnauthorized
 	case CodeAccountBecameExisting, CodeAlreadyJoined,
-		CodeStaleManifest, CodeGroupChanged, CodeBlockBusy:
+		CodeStaleManifest, CodeStaleSessionFile, CodeSessionIDConflict,
+		CodeGroupChanged, CodeBlockBusy:
 		return http.StatusConflict
-	case CodeBlockHashMismatch, CodeBadRequest:
+	case CodeBlockHashMismatch, CodeBadRequest, CodeInvalidSessionID:
 		return http.StatusBadRequest
-	case CodeBlockNotFound, CodeManifestNotFound:
+	case CodeBlockNotFound, CodeManifestNotFound, CodeSessionFileNotFound:
 		return http.StatusNotFound
 	case CodeQuotaExceeded, CodeBodyTooLarge:
 		return http.StatusRequestEntityTooLarge

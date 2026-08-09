@@ -11,6 +11,7 @@ import (
 type Event struct {
 	Type          string `json:"type"`
 	DeviceID      string `json:"deviceId,omitempty"`
+	SessionID     string `json:"sessionId,omitempty"`
 	Version       int64  `json:"version,omitempty"`
 	GroupRevision int64  `json:"groupRevision,omitempty"`
 	ServerTimeMS  int64  `json:"serverTimeMs"`
@@ -22,6 +23,14 @@ type subscriber struct {
 	closed   bool
 }
 
+// MaxSubscriptionsPerDevice 单设备允许的最大并发订阅数。限制已认证设备
+// 可无限开 WebSocket 连接耗尽 goroutine/fd 的资源滥用面（每个订阅 = 1 条
+// handler goroutine + 1 条读循环 goroutine + 32 槽 channel）。
+const MaxSubscriptionsPerDevice = 3
+
+// ErrTooManySubscriptions 表示设备并发订阅数已达上限。
+var ErrTooManySubscriptions = errors.New("too many subscriptions for device")
+
 // EventHub 是单实例 Relay 的有界内存通知总线；数据库仍是事实来源。
 type EventHub struct {
 	mu          sync.Mutex
@@ -32,20 +41,26 @@ func NewEventHub() *EventHub {
 	return &EventHub{subscribers: make(map[string]map[*subscriber]struct{})}
 }
 
-func (h *EventHub) Subscribe(deviceID string) (<-chan Event, func()) {
-	sub := &subscriber{deviceID: deviceID, events: make(chan Event, 32)}
+// Subscribe 为 deviceID 注册一个订阅者，返回事件 channel 与退订函数。
+// 该设备并发订阅数达到 MaxSubscriptionsPerDevice 时返回
+// ErrTooManySubscriptions（不创建订阅）。
+func (h *EventHub) Subscribe(deviceID string) (<-chan Event, func(), error) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.subscribers[deviceID]) >= MaxSubscriptionsPerDevice {
+		return nil, nil, ErrTooManySubscriptions
+	}
+	sub := &subscriber{deviceID: deviceID, events: make(chan Event, 32)}
 	if h.subscribers[deviceID] == nil {
 		h.subscribers[deviceID] = make(map[*subscriber]struct{})
 	}
 	h.subscribers[deviceID][sub] = struct{}{}
-	h.mu.Unlock()
 	cancel := func() {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		h.closeSubscriberLocked(sub)
 	}
-	return sub.events, cancel
+	return sub.events, cancel, nil
 }
 
 func (h *EventHub) Publish(deviceIDs []string, event Event) {
