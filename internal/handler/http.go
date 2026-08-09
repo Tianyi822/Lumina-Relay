@@ -107,7 +107,9 @@ func writeBadRequest(c *gin.Context) {
 	writeAPIError(c, apperr.New(apperr.CodeBadRequest, "请求格式无效"))
 }
 
-func writeAPIError(c *gin.Context, apiError *apperr.Error) {
+// writeAppError 写入错误响应、填充 requestId 并返回该 requestId。
+// 不记录日志——由调用方按需记录，避免与 writeAPIError 的 5xx 自动日志重复。
+func writeAppError(c *gin.Context, apiError *apperr.Error) string {
 	if apiError.Extra == nil {
 		apiError.Extra = make(map[string]any)
 	}
@@ -116,8 +118,16 @@ func writeAPIError(c *gin.Context, apiError *apperr.Error) {
 		requestID = uuid.NewString()
 	}
 	apiError.Extra["requestId"] = requestID
-	// 5xx 记录结构化错误日志：AccessLog 只记状态码，这里补上 code/message
-	// 与 requestId，否则内部故障只剩一个 500 无法定位。
+	apiError.WriteJSON(c.Writer)
+	c.Abort()
+	return requestID
+}
+
+// writeAPIError 写入错误响应；对 5xx 自动记录结构化日志（含 code/message/
+// requestId/path），补全 AccessLog 只有状态码的不足。未知错误请直接调用
+// writeAppError 并自行记录底层错误链，避免双重日志。
+func writeAPIError(c *gin.Context, apiError *apperr.Error) {
+	requestID := writeAppError(c, apiError)
 	if status := apiError.HTTPStatus(); status >= 500 {
 		logger.Error("api_error",
 			logger.Int("status", status),
@@ -127,8 +137,6 @@ func writeAPIError(c *gin.Context, apiError *apperr.Error) {
 			logger.String("path", c.Request.URL.Path),
 		)
 	}
-	apiError.WriteJSON(c.Writer)
-	c.Abort()
 }
 
 func writeServiceError(c *gin.Context, err error) {
@@ -169,13 +177,15 @@ func writeServiceError(c *gin.Context, err error) {
 	case errors.Is(err, service.ErrQuotaExceeded):
 		writeAPIError(c, apperr.New(apperr.CodeQuotaExceeded, "账户存储配额不足"))
 	default:
-		// 未知错误（多为 DB/文件系统故障）：记录完整错误链供排查——
-		// 客户端只收到泛化 500，错误细节绝不能泄漏到响应体。
+		// 未知错误（多为 DB/文件系统故障）：记一条带完整错误链 + requestId 的
+		// 日志即可，然后用 writeAppError 静默返回泛化 500——错误细节绝不能
+		// 泄漏到响应体，也不走 writeAPIError 重复记第二条 5xx 日志。
+		requestID := writeAppError(c, apperr.New(apperr.CodeInternalError, "服务内部错误"))
 		logger.Error("service internal error",
 			logger.Err(err),
 			logger.String("path", c.Request.URL.Path),
+			logger.String("request_id", requestID),
 		)
-		writeAPIError(c, apperr.New(apperr.CodeInternalError, "服务内部错误"))
 	}
 }
 
