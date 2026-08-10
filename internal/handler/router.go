@@ -66,8 +66,10 @@ func NewRouter(deps Deps) *gin.Engine {
 	if err := router.SetTrustedProxies([]string{"127.0.0.1"}); err != nil {
 		panic(fmt.Errorf("配置可信代理失败：%w", err))
 	}
-	// Recovery 最先注册：handler panic 在链内被捕获并转成统一 500，
-	// AccessLog 随后仍能记录该 500（中间件按注册顺序执行）。
+	// Recovery 最先注册：handler panic 在链内被捕获并转成统一 500。
+	// 注意 AccessLog 用顺序记录而非 defer，panic 请求会跳过 AccessLog 的
+	// 记录代码——panic 由 Recovery 自身的结构化日志（含堆栈）记录，
+	// 而非访问日志行。
 	router.Use(middleware.Recovery())
 	router.Use(middleware.AccessLog())
 	router.Use(middleware.SecurityHeaders())

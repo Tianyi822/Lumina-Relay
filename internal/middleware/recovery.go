@@ -19,13 +19,20 @@ import (
 // 后台 GC）仍需在各自入口 defer logger.RecoverLogOnly()。
 func Recovery() gin.HandlerFunc {
 	return gin.CustomRecovery(func(c *gin.Context, recovered any) {
-		logger.Error("handler panic recovered",
+		fields := []logger.Field{
 			logger.Any("panic", recovered),
 			logger.String("method", c.Request.Method),
 			logger.String("path", c.Request.URL.Path),
 			logger.String("client_ip", c.ClientIP()),
 			logger.String("stack", string(debug.Stack())),
-		)
+		}
+		// session 中间件可能已注入 accountId，附带记录便于按账户追踪 panic 来源。
+		if accountID, ok := c.Get(CtxAccountID); ok {
+			if id, ok := accountID.(string); ok && id != "" {
+				fields = append(fields, logger.String("account_id", id))
+			}
+		}
+		logger.Error("handler panic recovered", fields...)
 		apiErr := apperr.New(apperr.CodeInternalError, "服务内部错误")
 		apiErr.WriteJSON(c.Writer)
 		c.Abort()
