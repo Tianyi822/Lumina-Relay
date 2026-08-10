@@ -91,7 +91,7 @@ Lumina Relay 是端到端加密（E2EE）笔记同步服务的后端。服务端
     "maxManifestBytes": 4194304,
     "maxSessionFileBytes": 4194304,
     "maxBlockBytes": 1048576,
-    "maxMissingIds": 1000,
+    "maxMissingIds": 900,
     "maxDeviceNameBytes": 128,
     "blockGcGraceSeconds": 86400
   }
@@ -619,7 +619,7 @@ Manifest 是**设备级密文文档**：每台设备只推进自己的 head（CA
 { "ids": ["64-char-sha256", "..."] }
 ```
 
-每次最多 **1000 个 ID**（discovery 的 `maxMissingIds`）。
+每次最多 **900 个 ID**（discovery 的 `maxMissingIds`；受 64KiB JSON body limit 约束）。
 
 **响应 `200 OK`：**
 
@@ -1040,7 +1040,7 @@ A、B：收到 sync_group_merged 事件 → GET /bootstrap 刷新
 
 - **单块密文 ≤ 1 MiB**（`maxBlockBytes`）：早期设计稿的“大二进制 4MB 块”**作废**，`source.pdf`（1–10 MB）须切 2–10 块。
 - `blockId = hex(sha256(密文))`，64 位小写十六进制，内容寻址；客户端哈希必须统一 **SHA-256**。
-- `POST /blocks/missing` 单批 **≤ 1000 个 ID**。
+- `POST /blocks/missing` 单批 **≤ 900 个 ID**（受 64KiB JSON body limit 约束）。
 
 ### 13.5 Manifest 契约与粒度风险
 
