@@ -278,8 +278,15 @@ func TestBlockVisibilityFollowsSyncGroup(t *testing.T) {
 	seedAccountAndDevice(t, q, "account", "alice", "B", "group-b", 2)
 	ctx := context.Background()
 	blockID := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	if _, err := q.AttachBlock(ctx, "account", "A", blockID, 10, 3); err != nil {
-		t.Fatal(err)
+	// 直接 seed 块的三张表行（AttachBlock 已作为死代码删除）。
+	for _, stmt := range []string{
+		`INSERT INTO block_objects (block_id, size, created_at) VALUES ('` + blockID + `', 10, 3)`,
+		`INSERT INTO account_blocks (account_id, block_id, created_at) VALUES ('account', '` + blockID + `', 3)`,
+		`INSERT INTO device_blocks (device_id, block_id, created_at) VALUES ('A', '` + blockID + `', 3)`,
+	} {
+		if _, err := q.db.ExecContext(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
 	}
 	visible, err := q.IsBlockVisible(ctx, "account", "group-b", blockID)
 	if err != nil || visible {

@@ -61,6 +61,16 @@ func main() {
 func runServer(cfg config.AppConfig) {
 	defer logger.Recover()
 
+	// 配额配置校验：0/负值会让所有上传静默失败，超大值在转字节时溢出成负数
+	// 同样导致全量拒绝。启动期拦截，避免运行期表现为莫名其妙的 quota 超限。
+	const maxQuotaMB = 1 << 43 / (1024 * 1024) // 8 TiB 上限，远超 int64 字节域安全边界
+	if cfg.Storage.QuotaMB <= 0 || cfg.Storage.QuotaMB > maxQuotaMB {
+		logger.Error("配额配置非法，退出",
+			logger.Int("quotaMB", cfg.Storage.QuotaMB),
+			logger.Int("maxMB", maxQuotaMB))
+		return
+	}
+
 	// 信号 context：SIGINT/SIGTERM 触发优雅关闭
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -158,7 +168,14 @@ func runServer(cfg config.AppConfig) {
 	}()
 	defer func() {
 		stop()
-		<-gcDone
+		// 给 GC goroutine 至多 30 秒退出：单轮最多 256 块（每块一次文件
+		// 删除 + 几条 SQL），正常秒级完成；卡在 busy-wait 或不可中断的
+		// 文件操作时不让优雅关闭无限挂起。
+		select {
+		case <-gcDone:
+		case <-time.After(30 * time.Second):
+			logger.Warn("块 GC goroutine 未在 30 秒内退出，放弃等待")
+		}
 	}()
 
 	// 构造无版本协议依赖。
@@ -174,6 +191,7 @@ func runServer(cfg config.AppConfig) {
 		JWTSecret:          jwtSecret,
 		Queries:            q,
 		InstanceID:         instanceID,
+		TrustedProxies:     cfg.Server.TrustedProxies,
 	}
 
 	logger.Info("HTTP 服务即将监听",

@@ -24,6 +24,12 @@ const BlockOrphanGracePeriod = 24 * time.Hour
 
 var blockIDPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
+// MaxMissingIDs 是 /blocks/missing 单次请求允许的 ID 数上限。受 64KiB JSON
+// body limit 约束：每条 64-hex ID 加引号逗号约 68 字节，65536/68 ≈ 963。
+// 取 900 留出数组包装与边界余量，确保不超过 body limit；discovery 与本
+// 常量必须一致（见 handler/discovery.go）。
+const MaxMissingIDs = 900
+
 type BlocksService struct {
 	q   *db.Queries
 	bs  *store.BlockStore
@@ -89,7 +95,7 @@ func (s *BlocksService) Missing(
 	accountID, groupID string,
 	ids []string,
 ) ([]string, error) {
-	if len(ids) > 1000 {
+	if len(ids) > MaxMissingIDs {
 		return nil, ErrInvalidInput
 	}
 	missing := make([]string, 0)

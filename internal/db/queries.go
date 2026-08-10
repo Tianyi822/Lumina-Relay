@@ -41,16 +41,23 @@ func (q *Queries) WithTx(ctx context.Context, fn func(*Queries) error) error {
 	if err != nil {
 		return fmt.Errorf("开启事务：%w", err)
 	}
+	// 兜底回滚：fn panic 时 Rollback 不会被 err 分支覆盖，未回滚的 *sql.Tx
+	// 会被 database/sql 当作泄漏的连接长期占用。committed 标记正常提交后
+	// 跳过回滚（Commit 成功后再 Rollback 会报 sql.ErrTxDone，属噪音）。
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
 	txq := &Queries{db: tx}
 	if err := fn(txq); err != nil {
-		if rollbackErr := tx.Rollback(); rollbackErr != nil {
-			return fmt.Errorf("回滚事务失败（原错误 %v）：%w", err, rollbackErr)
-		}
-		return err
+		return err // defer 已回滚
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("提交事务：%w", err)
 	}
+	committed = true
 	return nil
 }
 
@@ -904,91 +911,15 @@ VALUES (?, ?, ?)`, reservation.DeviceID, reservation.BlockID, now)
 	return out, err
 }
 
-func (q *Queries) AttachBlock(
-	ctx context.Context,
-	accountID, deviceID, blockID string,
-	size, now int64,
-) (AttachBlockResult, error) {
-	var out AttachBlockResult
-	err := q.WithTx(ctx, func(txq *Queries) error {
-		device, err := txq.GetDevice(ctx, deviceID)
-		if err != nil || device.AccountID != accountID || device.Status != "active" {
-			return fmt.Errorf("块上传设备无效")
-		}
-		var objectSize int64
-		var objectState string
-		err = txq.db.QueryRowxContext(ctx,
-			`SELECT size, state FROM block_objects WHERE block_id = ?`,
-			blockID).Scan(&objectSize, &objectState)
-		switch {
-		case err == nil && objectSize != size:
-			return fmt.Errorf("块对象大小冲突")
-		case err == nil && objectState == "deleting":
-			return ErrUploadInProgress
-		case errors.Is(err, sql.ErrNoRows):
-			if _, err := txq.db.ExecContext(ctx, `
-INSERT INTO block_objects (block_id, size, created_at) VALUES (?, ?, ?)`,
-				blockID, size, now); err != nil {
-				return fmt.Errorf("创建块对象：%w", err)
-			}
-			out.ObjectCreated = true
-		case err != nil:
-			return fmt.Errorf("读取块对象：%w", err)
-		}
-
-		var accountHas int
-		if err := txq.db.QueryRowxContext(ctx, `
-SELECT EXISTS (SELECT 1 FROM account_blocks WHERE account_id = ? AND block_id = ?)`,
-			accountID, blockID).Scan(&accountHas); err != nil {
-			return err
-		}
-		if accountHas == 0 {
-			var used, quota int64
-			if err := txq.db.QueryRowxContext(ctx, `
-SELECT used_bytes, quota_bytes FROM accounts WHERE account_id = ?`,
-				accountID).Scan(&used, &quota); err != nil {
-				return err
-			}
-			if used+size > quota {
-				return ErrQuotaExceeded
-			}
-			if _, err := txq.db.ExecContext(ctx, `
-INSERT INTO account_blocks (account_id, block_id, created_at) VALUES (?, ?, ?)`,
-				accountID, blockID, now); err != nil {
-				return err
-			}
-			if _, err := txq.db.ExecContext(ctx, `
-UPDATE accounts SET used_bytes = used_bytes + ? WHERE account_id = ?`,
-				size, accountID); err != nil {
-				return err
-			}
-			out.AccountAssociation = true
-		}
-		if _, err := txq.db.ExecContext(ctx, `
-UPDATE block_objects SET state = 'active', orphaned_at = NULL
-WHERE block_id = ?`, blockID); err != nil {
-			return err
-		}
-		result, err := txq.db.ExecContext(ctx, `
-INSERT OR IGNORE INTO device_blocks (device_id, block_id, created_at)
-VALUES (?, ?, ?)`, deviceID, blockID, now)
-		if err != nil {
-			return err
-		}
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return err
-		}
-		out.DeviceAssociation = affected == 1
-		return nil
-	})
-	return out, err
-}
-
 type PruneResult struct {
 	OrphanBlockIDs []string
 	ReclaimedBytes int64
 }
+
+// pruneBatchSize 限制单次裁剪/丢弃事务处理的候选块数，避免大组（数万块）
+// 单事务持锁数十秒、阻塞其他写请求。复核在每批事务开头重做，跨批间设备
+// 仍可能被吊销/换组，会以 ErrGroupChanged/ErrInactiveDevice 中止。
+const pruneBatchSize = 256
 
 func (q *Queries) PruneGroupBlocks(
 	ctx context.Context,
@@ -998,60 +929,71 @@ func (q *Queries) PruneGroupBlocks(
 	now int64,
 ) (PruneResult, error) {
 	var out PruneResult
-	err := q.WithTx(ctx, func(txq *Queries) error {
-		device, err := txq.GetDevice(ctx, deviceID)
-		if err != nil || device.AccountID != accountID || !device.SyncGroupID.Valid {
-			return ErrGroupChanged
-		}
-		if device.Status != "active" {
-			return ErrInactiveDevice
-		}
-		if device.SyncGroupID.String != groupID {
-			return ErrGroupChanged
-		}
-		group, err := txq.GetSyncGroup(ctx, groupID)
-		if err != nil || group.AccountID != accountID || group.Revision != expectedRevision {
-			return ErrGroupChanged
-		}
-		rows, err := txq.db.QueryxContext(ctx, `
+	// 先在只读路径收集全部候选（不持写锁），再分批在独立写事务内释放，
+	// 避免单个大事务在数万块时长时间独占 SQLite 写锁。
+	rows, err := q.db.QueryxContext(ctx, `
 SELECT DISTINCT b.block_id
 FROM device_blocks b
 JOIN devices d ON d.device_id = b.device_id
 WHERE d.account_id = ? AND d.sync_group_id = ?`, accountID, groupID)
-		if err != nil {
-			return err
+	if err != nil {
+		return out, err
+	}
+	var candidates []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return out, err
 		}
-		var candidates []string
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return err
+		if _, ok := keep[id]; !ok {
+			candidates = append(candidates, id)
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return out, err
+	}
+	if err := rows.Err(); err != nil {
+		return out, err
+	}
+
+	for start := 0; start < len(candidates); start += pruneBatchSize {
+		end := start + pruneBatchSize
+		if end > len(candidates) {
+			end = len(candidates)
+		}
+		batchErr := q.WithTx(ctx, func(txq *Queries) error {
+			device, err := txq.GetDevice(ctx, deviceID)
+			if err != nil || device.AccountID != accountID || !device.SyncGroupID.Valid ||
+				device.SyncGroupID.String != groupID || device.Status != "active" {
+				return ErrGroupChanged
 			}
-			if _, ok := keep[id]; !ok {
-				candidates = append(candidates, id)
+			group, err := txq.GetSyncGroup(ctx, groupID)
+			if err != nil || group.AccountID != accountID || group.Revision != expectedRevision {
+				return ErrGroupChanged
 			}
-		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-		for _, id := range candidates {
-			if _, err := txq.db.ExecContext(ctx, `
+			for _, id := range candidates[start:end] {
+				if _, err := txq.db.ExecContext(ctx, `
 DELETE FROM device_blocks
 WHERE block_id = ? AND device_id IN (
     SELECT device_id FROM devices WHERE account_id = ? AND sync_group_id = ?
 )`, id, accountID, groupID); err != nil {
-				return err
+					return err
+				}
+				if err := txq.releaseUnreferencedAccountBlock(
+					ctx, accountID, id, now, &out); err != nil {
+					return err
+				}
 			}
-			if err := txq.releaseUnreferencedAccountBlock(
-				ctx, accountID, id, now, &out); err != nil {
-				return err
-			}
+			return nil
+		})
+		if batchErr != nil {
+			sort.Strings(out.OrphanBlockIDs)
+			return out, batchErr
 		}
-		return nil
-	})
+	}
 	sort.Strings(out.OrphanBlockIDs)
-	return out, err
+	return out, nil
 }
 
 type DiscardGroupsResult struct {
@@ -1067,6 +1009,7 @@ func (q *Queries) DiscardOtherGroups(
 	now int64,
 ) (DiscardGroupsResult, error) {
 	var out DiscardGroupsResult
+	var orphanCandidates []string
 	err := q.WithTx(ctx, func(txq *Queries) error {
 		device, err := txq.GetDevice(ctx, callerDeviceID)
 		if err != nil || device.AccountID != accountID ||
@@ -1097,10 +1040,14 @@ WHERE account_id = ? AND sync_group_id IS NOT NULL AND sync_group_id <> ?`,
 		if err := rows.Close(); err != nil {
 			return err
 		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
 		if len(out.RevokedDeviceIDs) == 0 {
 			return nil
 		}
 
+		// 必须在级联删除前收集候选块 id：device_blocks 行会被同事务的 DELETE 清空。
 		blockRows, err := txq.db.QueryxContext(ctx, `
 SELECT DISTINCT b.block_id
 FROM device_blocks b
@@ -1109,16 +1056,18 @@ WHERE d.account_id = ? AND d.sync_group_id <> ?`, accountID, currentGroupID)
 		if err != nil {
 			return err
 		}
-		var blockIDs []string
 		for blockRows.Next() {
 			var id string
 			if err := blockRows.Scan(&id); err != nil {
 				blockRows.Close()
 				return err
 			}
-			blockIDs = append(blockIDs, id)
+			orphanCandidates = append(orphanCandidates, id)
 		}
 		if err := blockRows.Close(); err != nil {
+			return err
+		}
+		if err := blockRows.Err(); err != nil {
 			return err
 		}
 
@@ -1175,17 +1124,33 @@ WHERE account_id = ?`, sessionBytes, accountID); err != nil {
 			}
 			out.ReclaimedBytes += sessionBytes
 		}
+		return nil
+	})
+	// 结构性变更已提交（设备吊销、组删除）。块配额释放作为清理阶段：分批独立
+	// 事务处理候选块，避免大组（数万块）单事务长时间持锁阻塞其他写请求。
+	// 此处无需复核设备/组（已不可逆），releaseUnreferencedAccountBlock 自身幂等。
+	for start := 0; start < len(orphanCandidates) && err == nil; start += pruneBatchSize {
+		end := start + pruneBatchSize
+		if end > len(orphanCandidates) {
+			end = len(orphanCandidates)
+		}
 		var released PruneResult
-		for _, id := range blockIDs {
-			if err := txq.releaseUnreferencedAccountBlock(
-				ctx, accountID, id, now, &released); err != nil {
-				return err
+		releaseErr := q.WithTx(ctx, func(txq *Queries) error {
+			for _, id := range orphanCandidates[start:end] {
+				if err := txq.releaseUnreferencedAccountBlock(
+					ctx, accountID, id, now, &released); err != nil {
+					return err
+				}
 			}
+			return nil
+		})
+		if releaseErr != nil {
+			err = releaseErr
+			break
 		}
 		out.OrphanBlockIDs = append(out.OrphanBlockIDs, released.OrphanBlockIDs...)
 		out.ReclaimedBytes += released.ReclaimedBytes
-		return nil
-	})
+	}
 	sort.Strings(out.RevokedDeviceIDs)
 	sort.Strings(out.OrphanBlockIDs)
 	return out, err
@@ -1293,6 +1258,10 @@ LIMIT ?`, orphanedBefore, limit)
 				return err
 			}
 			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
 		}
 		if err := rows.Close(); err != nil {
 			return err
