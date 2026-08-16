@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 
@@ -75,6 +76,19 @@ func applyEnv(cfg AppConfig) AppConfig {
 	}
 	if v := os.Getenv("LUMINA_SERVER_HOST"); v != "" {
 		cfg.Server.Host = v
+	}
+	if v := os.Getenv("LUMINA_TRUSTED_PROXIES"); v != "" {
+		// 逗号分隔的反代网段，覆盖默认的 127.0.0.1。空值保留配置文件值。
+		proxies := strings.Split(v, ",")
+		cleaned := make([]string, 0, len(proxies))
+		for _, p := range proxies {
+			if t := strings.TrimSpace(p); t != "" {
+				cleaned = append(cleaned, t)
+			}
+		}
+		if len(cleaned) > 0 {
+			cfg.Server.TrustedProxies = cleaned
+		}
 	}
 	return cfg
 }

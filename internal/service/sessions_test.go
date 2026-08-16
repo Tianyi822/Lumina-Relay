@@ -85,10 +85,12 @@ func TestSessionServiceRejectsInvalidSessionID(t *testing.T) {
 		"../etc/passwd",
 		"session-1-a/b",
 		"session-1-A",             // 大写非法
-		"notasession",             // 前缀错
-		"session--x",              // 时间戳段为空
-		"session-1-",              // 随机后缀为空
-		"session-1-" + longSuffix, // 超长
+		"123numeric",              // 数字开头非法（首字符必须小写字母）
+		"-leading-dash",           // 连字符开头非法
+		"paper-meta-",             // 尾部连字符非法（末字符必须字母或数字）
+		"ab",                      // 过短（最少 3 字节）
+		"session-1-",              // 尾部连字符非法
+		"session-1-" + longSuffix, // 超长（前缀 10 + 后缀 60 > 64 上限）
 	}
 	for _, id := range bad {
 		if _, err := svc.Put(ctx, "acc", "grp", "A", id, 0, []byte("x")); !errors.Is(err, ErrInvalidSessionID) {
@@ -107,7 +109,37 @@ func TestSessionServiceRejectsInvalidSessionID(t *testing.T) {
 	}
 }
 
-var longSuffix = string(bytes.Repeat([]byte("a"), 40))
+// TestSessionServiceAcceptsEntitySessionIDs 验证放宽后的正则接受客户端按业务实体类型
+// 命名的 sessionId（paper-*/writer-*/knowledge-* 等小写前缀）。样本取自生产日志中
+// 客户端实际使用的 sessionId，确保前后端契约对齐。
+func TestSessionServiceAcceptsEntitySessionIDs(t *testing.T) {
+	svc, q, cleanup := newSessionFileFixture(t)
+	defer cleanup()
+	seedSessionAccount(t, q, "acc", "A", "grp")
+	ctx := context.Background()
+
+	// 覆盖日志中出现的全部真实前缀格式
+	good := []string{
+		"session-1776915003481-9x8ruh",                   // 回归：原有 session-* 格式
+		"paper-meta-f24d0624-929b-4406-8f19-c1d5f9a7f32f",
+		"paper-annotations-705d64aa-36f9-45f0-91da-036314f52418",
+		"paper-pack-0154b2ab-cf67-460e-88c3-0c995f175863",
+		"knowledge-bases",
+		"knowledge-metadata",
+		"knowledge-file-file-1773726865157",
+		"writer-doc-writer-dba6a205-91b3-4863-81a4-2a57fed5aab3",
+		"writer-index",
+	}
+	for _, id := range good {
+		if _, err := svc.Put(ctx, "acc", "grp", "A", id, 0, []byte("x")); err != nil {
+			t.Errorf("Put(%q) err=%v want nil（合法实体 sessionId）", id, err)
+		}
+	}
+}
+
+// longSuffix 长度需保证拼接后超过 sessionId 总长上限 64 字节
+// （"session-1-" 占 10 字节，故 60 字符后缀拼出 70 字节，稳定超限）。
+var longSuffix = string(bytes.Repeat([]byte("a"), 60))
 
 func TestSessionServiceInputLimits(t *testing.T) {
 	svc, q, cleanup := newSessionFileFixture(t)

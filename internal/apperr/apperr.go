@@ -84,7 +84,12 @@ func (e *Error) HTTPStatus() int {
 		return http.StatusBadRequest
 	case CodeBlockNotFound, CodeManifestNotFound, CodeSessionFileNotFound:
 		return http.StatusNotFound
-	case CodeQuotaExceeded, CodeBodyTooLarge:
+	case CodeQuotaExceeded:
+		// 402 Payment Required：账号存储配额耗尽，需用户清理或扩容才能恢复，
+		// 属永久性失败（区别于 429 限流的临时性）。与 body_too_large(413) 分离，
+		// 避免配额问题被误判为体积问题。
+		return http.StatusPaymentRequired
+	case CodeBodyTooLarge:
 		return http.StatusRequestEntityTooLarge
 	case CodeRateLimited:
 		return http.StatusTooManyRequests

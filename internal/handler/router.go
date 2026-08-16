@@ -32,6 +32,11 @@ type Deps struct {
 	// 避免事件循环无限卡死在写调用上（心跳与慢消费者保护同时失效）。
 	// 零值由 NewRouter 设为默认 10s；测试可注入小值加速验证。
 	WSWriteTimeout time.Duration
+	// TrustedProxies 是受信反代网段，传给 gin SetTrustedProxies。反代不在
+	// 127.0.0.1（如独立反代主机、K8s ingress）时必须显式配置，否则
+	// c.ClientIP() 对全站返回反代 IP，使按 IP 限流退化为单一共享桶。
+	// nil 时默认 ["127.0.0.1"]。
+	TrustedProxies []string
 }
 
 func NewRouter(deps Deps) *gin.Engine {
@@ -59,15 +64,21 @@ func NewRouter(deps Deps) *gin.Engine {
 	if deps.WSWriteTimeout <= 0 {
 		deps.WSWriteTimeout = 10 * time.Second
 	}
+	trustedProxies := deps.TrustedProxies
+	if trustedProxies == nil {
+		trustedProxies = []string{"127.0.0.1"}
+	}
 
 	router := gin.New()
 	router.RedirectTrailingSlash = false
 	router.RedirectFixedPath = false
-	if err := router.SetTrustedProxies([]string{"127.0.0.1"}); err != nil {
+	if err := router.SetTrustedProxies(trustedProxies); err != nil {
 		panic(fmt.Errorf("配置可信代理失败：%w", err))
 	}
-	// Recovery 最先注册：handler panic 在链内被捕获并转成统一 500，
-	// AccessLog 随后仍能记录该 500（中间件按注册顺序执行）。
+	// Recovery 最先注册：handler panic 在链内被捕获并转成统一 500。
+	// 注意 AccessLog 用顺序记录而非 defer，panic 请求会跳过 AccessLog 的
+	// 记录代码——panic 由 Recovery 自身的结构化日志（含堆栈）记录，
+	// 而非访问日志行。
 	router.Use(middleware.Recovery())
 	router.Use(middleware.AccessLog())
 	router.Use(middleware.SecurityHeaders())

@@ -45,7 +45,7 @@ func Discovery(instanceID string) gin.HandlerFunc {
 			Limits: discoveryLimits{
 				MaxJSONBytes: 64 << 10, MaxManifestBytes: service.MaxManifestBytes,
 				MaxSessionFileBytes: service.MaxSessionFileBytes,
-				MaxBlockBytes:       1 << 20, MaxMissingIDs: 1000,
+				MaxBlockBytes:       1 << 20, MaxMissingIDs: service.MaxMissingIDs,
 				MaxDeviceNameBytes: service.MaxDeviceNameBytes,
 				BlockGCGraceSec:    int64(service.BlockOrphanGracePeriod / time.Second),
 			},

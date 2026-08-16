@@ -13,8 +13,9 @@ type AppConfig struct {
 
 // ServerConfig 是 HTTP 服务配置（占位，后续接入 Gin 时填充）。
 type ServerConfig struct {
-	Port int    `yaml:"port"` // 默认 8443
-	Host string `yaml:"host"` // 默认 "0.0.0.0"
+	Port           int      `yaml:"port"`           // 默认 8443
+	Host           string   `yaml:"host"`           // 默认 "0.0.0.0"
+	TrustedProxies []string `yaml:"trustedProxies"` // 默认 ["127.0.0.1"]；反代所在网段需显式配置，否则 c.ClientIP() 会误信 X-Forwarded-For 或全站共享反代 IP 的限流桶
 }
 
 // StorageConfig 是存储相关配置（数据库、密文块、配额）。
@@ -31,7 +32,7 @@ func Default() AppConfig {
 	}
 	return AppConfig{
 		Log:     logCfg,
-		Server:  ServerConfig{Port: 8443, Host: "0.0.0.0"},
+		Server:  ServerConfig{Port: 8443, Host: "0.0.0.0", TrustedProxies: []string{"127.0.0.1"}},
 		Storage: StorageConfig{QuotaMB: 1024},
 	}
 }
