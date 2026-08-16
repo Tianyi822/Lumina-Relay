@@ -20,7 +20,7 @@ func TestHTTPStatus(t *testing.T) {
 		{"stale_manifest→409", New(CodeStaleManifest, ""), 409},
 		{"session_id_conflict→409", New(CodeSessionIDConflict, ""), 409},
 		{"block_hash_mismatch→400", New(CodeBlockHashMismatch, ""), 400},
-		{"quota_exceeded→413", New(CodeQuotaExceeded, ""), 413},
+		{"quota_exceeded→402", New(CodeQuotaExceeded, ""), 402},
 		{"rate_limited→429", New(CodeRateLimited, ""), 429},
 		{"unknown→500", New(Code("totally_unknown"), ""), 500},
 	}

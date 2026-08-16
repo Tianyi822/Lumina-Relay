@@ -635,7 +635,7 @@ Manifest 是**设备级密文文档**：每台设备只推进自己的 head（CA
 
 - `blockId` 必须等于 `hex(sha256(body))`，不匹配返回 `400 block_hash_mismatch`；
 - **响应**：新建 `201 {"created": true}`；已存在（对当前组可见）幂等返回 `200 {"created": false}`；
-- 超配额：`413 quota_exceeded`；并发上传同一块冲突：`409 block_busy`（稍后重试）。
+- 超配额：`402 quota_exceeded`；并发上传同一块冲突：`409 block_busy`（稍后重试）。
 
 ### 7.3 `GET /blocks/:blockId`
 
@@ -657,11 +657,13 @@ Manifest 是**设备级密文文档**：每台设备只推进自己的 head（CA
 
 会话数据以**整文件密文快照**形式同步，服务端存 SQLite BLOB、从不解析内容；快照结构、增量合并、去重全部是客户端职责。**不存在 append/index 路由**（`POST /session-files/:sessionId/append/*`、`GET|PUT /session-files-index*` 均为 404）。
 
+> ⚠️ **通道用途限制**：本通道**仅用于会话密文快照**。实体二进制内容（论文 PDF、知识库文件、向量库等）必须走 **Manifest+blocks** 通道分块上传（见 §6.5 / §7 / §13.1），走本通道超过 4 MiB 会被 `413 body_too_large` 拒绝。
+
 基础规则：
 
-- `sessionId` 由客户端生成，必须匹配 `^session-[0-9]{1,16}-[a-z0-9]{1,32}$` 且总长不超过 64 字节，否则 `400 invalid_session_id`；
+- `sessionId` 由客户端生成，必须匹配 `^[a-z][a-z0-9-]{1,62}[a-z0-9]$` 且总长不超过 64 字节，否则 `400 invalid_session_id`。正则放开前缀，允许按**会话所属的实体类型**命名（如 `session-*` 普通会话、`paper-*` 论文编辑会话、`writer-*` 写作器会话）；字符集严格限定小写字母/数字/连字符（天然排除 `/`、`\`、`..`、空格、大写等路径穿越与注入字符），首字符必须小写字母、末字符必须字母或数字。注意：前缀反映的是会话所属实体类型，**不代表该实体的二进制内容可走本通道**——实体文件仍走 Manifest+blocks；
 - `sessionId` **账号内唯一**：PUT 时若被同账号其他同步组占用返回 `409 session_id_conflict`；GET 对其他组占用的 ID 视为不存在（`404 session_file_not_found`），DELETE 视为幂等成功（`200 {"deleted": false}`）；
-- 单个快照密文上限 **4 MiB**（discovery 的 `maxSessionFileBytes`），超限 `413 body_too_large`；密文大小计入账号配额，超配额 `413 quota_exceeded`；
+- 单个快照密文上限 **4 MiB**（discovery 的 `maxSessionFileBytes`），超限 `413 body_too_large`；密文大小计入账号配额，超配额 `402 quota_exceeded`；
 - 所有写操作在**单个 SQLite 事务**内完成设备复核、CAS 与配额调整。
 
 ### 8.1 `GET /session-files`
@@ -834,7 +836,7 @@ payload 示例：
 
 - 每账号默认配额 **1024 MiB**（服务端 `config.yaml` 的 `storage.quotaMB` 可调）；
 - block 密文与会话快照密文共同计入 `used_bytes`；上传中的 block 预留（reservation）也占用配额判定；
-- 超配额返回 `413 quota_exceeded`；释放途径：删除会话快照（CAS DELETE）、`discard-others`、块 GC。
+- 超配额返回 `402 quota_exceeded`（区别于 413 body_too_large 的体积超限）；释放途径：删除会话快照（CAS DELETE）、`discard-others`、块 GC。
 
 ### 10.5 限流机制
 
@@ -987,12 +989,12 @@ A、B：收到 sync_group_merged 事件 → GET /bootstrap 刷新
 | `block_busy` | 409 | 同一块并发上传冲突 | 短暂退避后重试 PUT |
 | `bad_request` | 400 | JSON 结构/字段/路径参数非法 | 修正请求，不重试原样请求 |
 | `block_hash_mismatch` | 400 | blockId ≠ sha256(body) | 检查客户端哈希实现（必须 SHA-256） |
-| `invalid_session_id` | 400 | sessionId 不匹配正则或超长 | 修正 sessionId 生成规则 |
+| `invalid_session_id` | 400 | sessionId 不匹配正则（首字符须小写字母、仅小写/数字/连字符、末字符须字母或数字）或超长（>64 字节） | 修正 sessionId 生成规则 |
 | `block_not_found` | 404 | 块对当前组不可见或不存在 | 视为数据缺失；检查是否未合并同步组 |
 | `manifest_not_found` | 404 | Manifest 版本不存在或不属于当前组 | 重新 `GET /manifests` 对账 |
 | `session_file_not_found` | 404 | 会话快照不存在（含被其他组占用） | 从列表移除本地引用 |
 | `body_too_large` | 413 | 请求体超过对应端点上限 | 客户端切块/压缩，检查 discovery limits |
-| `quota_exceeded` | 413 | 账号配额不足 | 提示用户清理（删除快照/discard），不自动重试 |
+| `quota_exceeded` | 402 | 账号配额不足 | 提示用户清理（删除快照/discard）或扩容，不自动重试 |
 | `rate_limited` | 429 | 触发限流（附 `retryAfterMs`） | 按 `retryAfterMs` 退避后重试 |
 | `internal_error` | 500 | 服务端内部错误 | 指数退避重试；持续失败上报 |
 | `relay_not_initialized` | 503 | Relay 尚未初始化（仅 discovery） | 稍后重试 |
@@ -1003,7 +1005,7 @@ A、B：收到 sync_group_merged 事件 → GET /bootstrap 刷新
 - **必须换 nonce**：任何重试都要生成新的 `X-Nonce` 并重签 canonical（nonce 单次使用）；
 - **409 冲突类不要盲目重试**：先拉取最新状态（bootstrap / manifests / session-files）再决策；
 - **401 分流**：`invalid_device_proof` 查签名实现与时钟；session token 过期走 `/session-challenges` 续期；`device_revoked` 退出登录；
-- **413/429 不要立即原样重试**：分别属于永久性（需改请求）与临时性（按 `retryAfterMs`）失败。
+- **402/413/429 不要立即原样重试**：402 配额耗尽（需用户清理/扩容）、413 请求体超限（需切分或压缩）均为永久性；429 限流为临时性（按 `retryAfterMs`）。
 
 ---
 
@@ -1019,16 +1021,19 @@ A、B：收到 sync_group_merged 事件 → GET /bootstrap 刷新
 | `sessions/{id}.jsonl` | 会话快照（§8） | `sessionId` | 整文件快照，见 §13.3 |
 | `sessions/index.json` | Manifest + blocks 或不同步 | `sessions/index` | 派生索引，缺失可重建 |
 | `papers/{id}/**` | Manifest + blocks | `papers/{id}/<相对路径>` | 条目粒度风险见 §13.5；`reader-document.json` 不同步 |
-| `knowledge/**` | Manifest + blocks | `knowledge/<相对路径>` | `data/db/`（LanceDB 向量库）**不同步**，目标端重建 |
+| `knowledge/**` | Manifest + blocks | `knowledge/<相对路径>` | 知识库**文件内容走 blocks 切块**（单块 ≤1 MiB，大文件参照 §13.4 source.pdf 先例）；`data/db/`（LanceDB 向量库）**不同步**，目标端重建。仅知识库相关的会话/元数据状态可走 session-files（§8） |
 | `writing/**` | Manifest + blocks | `writing/<相对路径>` | `revision` 语义见 §13.6 |
 | `logs/`、`tool-stats/`、渲染进程 localStorage | 不同步 | — | 设备诊断 / UI 状态，跨设备合并无意义 |
 
 ### 13.2 sessionId 契约（已核对兼容）
 
-后端强制 `^session-[0-9]{1,16}-[a-z0-9]{1,32}$` 且总长 ≤ 64 字节（`internal/service/sessions.go`）。客户端各会话工厂统一生成 `session-${Date.now()}-${Math.random().toString(36).substring(2,8)}`：
+后端强制 `^[a-z][a-z0-9-]{1,62}[a-z0-9]$` 且总长 ≤ 64 字节（`internal/service/sessions.go`）。正则放开前缀但收紧字符集：允许任意小写字母开头的命名，便于客户端按**会话所属的实体类型**生成 sessionId（如 `session-*` 普通会话、`paper-*` 论文编辑会话、`writer-*` 写作器会话）；同时严格排除 `/`、`\`、`..`、空格、大写等危险字符，首字符必须小写字母、末字符必须字母或数字（拒绝尾部连字符）。
 
-- 时间戳 13 位毫秒 ≤ 16 位、随机段 6 位 base36 属 `[a-z0-9]` ≤ 32 位、总长约 28 字符 ≤ 64——**完全落在后端正则子集内**，无需任何一方改动。
-- **低优先级隐患（客户端既有，非同步阻断）**：① `Math.random()` 退化时 `substring(2,8)` 可能返回空 / 极短随机段，生成的 ID 连客户端自身校验都过不了（概率近乎为零）；② 6 位 base36 + 毫秒时间戳在同组多设备下存在生日碰撞，碰撞会让两个会话被当作同一 `(account, sessionId)` 快照互相覆盖。**建议启用多设备会话同步前把随机段加长或改用 `crypto.randomUUID()`。**
+> 注意：sessionId 前缀只反映"会话所属的实体类型"，**不代表该实体的二进制内容可走 session-files 通道**。论文 PDF、知识库文件、向量库等实体文件必须走 Manifest+blocks（§6.5/§13.1）；session-files 仅承载会话密文快照，单文件 ≤ 4 MiB。
+
+- 客户端原有生成器 `session-${Date.now()}-${Math.random().toString(36).substring(2,8)}` 仍完全落在新正则子集内，无需改动。
+- 实体会话 sessionId 建议 `${type}-${entityId}` 形式，如 `paper-meta-${uuid}`、`writer-doc-${uuid}`——保证全小写、仅 `[a-z0-9-]`、总长 ≤ 64 即可。
+- **低优先级隐患（客户端既有，非同步阻断）**：① `Math.random()` 退化时 `substring(2,8)` 可能返回空 / 极短随机段，生成的 ID 连客户端自身校验都过不了（概率近乎为零）；② 基于毫秒时间戳 + 短随机段的 ID 在同组多设备下存在生日碰撞，碰撞会让两个会话被当作同一 `(account, sessionId)` 快照互相覆盖。**建议启用多设备会话同步前把随机段加长或改用 `crypto.randomUUID()`。**
 
 ### 13.3 会话同步模型
 

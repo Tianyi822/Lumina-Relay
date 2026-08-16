@@ -23,6 +23,7 @@
 .idea/
 .vscode/
 .qoder/
+.zcode/
 *.swp
 *.swo
 

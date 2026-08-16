@@ -27,9 +27,20 @@ var (
 	ErrSessionIDConflict   = errors.New("session id conflict")
 )
 
-// sessionIDPattern 是客户端 sessionId 命名规则的服务端收紧版：
-// 正则天然排除 `/`、`\`、`..`，长度上限另行防御。
-var sessionIDPattern = regexp.MustCompile(`^session-[0-9]{1,16}-[a-z0-9]{1,32}$`)
+// sessionIDPattern 规定客户端 sessionId 的字符集与长度，天然排除路径穿越与注入：
+//   - 首字符必须小写字母（拒绝数字开头、`/`、`\`、`.`、`-` 开头）；
+//   - 中段仅允许小写字母/数字/连字符；
+//   - 末字符必须小写字母或数字（拒绝尾部连字符，避免空段歧义）；
+//   - 总长 3–64 字节，与 maxSessionIDLen 对齐。
+//
+// 放宽历史：早期只接受 `session-<ts>-<rand>` 单一格式；客户端现按会话所属的实体类型
+// 命名 sessionId（如 paper-* 的论文编辑会话、writer-* 的写作会话），故放开前缀但保留
+// 字符集与长度约束。
+//
+// 注意：sessionId 前缀反映的是"会话所属实体类型"，不代表该实体的二进制内容走本通道。
+// session-files 通道仅用于会话密文快照；实体文件（论文 PDF、知识库文件、向量库等）
+// 仍须走 Manifest+blocks 分块上传（见 FRONTEND_INTEGRATION §6.5 / §13.1）。
+var sessionIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{1,62}[a-z0-9]$`)
 
 const maxSessionIDLen = 64
 
